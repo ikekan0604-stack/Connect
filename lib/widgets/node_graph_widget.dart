@@ -1,6 +1,9 @@
 import 'dart:async';
 import 'dart:math';
+import 'dart:typed_data';
 import 'dart:ui' as ui;
+// ignore: avoid_web_libraries_in_flutter
+import 'dart:html' as html;
 import 'package:flutter/material.dart';
 import '../models/user.dart';
 import '../models/connection.dart';
@@ -313,11 +316,14 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget> {
     }
 
     final idIdx = {for (int i = 0; i < n; i++) ordered[i].id: i};
-    final fEdges = <List<int>>[];
+    // Edges carry a spring-multiplier so closer relationships pull nodes together.
+    final fEdges = <(int, int, double)>[];
     for (final c in widget.connections) {
       final a = idIdx[c.userId1];
       final b = idIdx[c.userId2];
-      if (a != null && b != null && a != b) fEdges.add([a, b]);
+      if (a != null && b != null && a != b) {
+        fEdges.add((a, b, _springMult(c.level)));
+      }
     }
 
     final shortSide = max(min(size.width, size.height), 200.0);
@@ -404,30 +410,30 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget> {
 
   Future<void> _loadNetworkImage(String id, String url) async {
     try {
-      final completer = Completer<ui.Image?>();
-      final imageProvider = NetworkImage(url);
-      final stream = imageProvider.resolve(ImageConfiguration.empty);
-      late ImageStreamListener listener;
-      listener = ImageStreamListener(
-        (info, _) {
-          if (!completer.isCompleted) completer.complete(info.image);
-          stream.removeListener(listener);
-        },
-        onError: (e, _) {
-          if (!completer.isCompleted) completer.complete(null);
-          stream.removeListener(listener);
-        },
+      // Use dart:html XHR to fetch raw image bytes — more reliable than
+      // NetworkImage on Flutter web (CanvasKit) which can silently fail.
+      final request = await html.HttpRequest.request(
+        url,
+        responseType: 'arraybuffer',
+      ).timeout(const Duration(seconds: 15));
+      if (request.status != 200) return;
+      final bytes = (request.response as ByteBuffer).asUint8List();
+      // Decode to ui.Image via Skia codec — produces a CanvasKit-native image.
+      final codec = await ui.instantiateImageCodec(
+        bytes,
+        targetWidth: 120,
+        targetHeight: 120,
       );
-      stream.addListener(listener);
-      final img = await completer.future;
-      if (img != null && mounted) {
+      final frame = await codec.getNextFrame();
+      codec.dispose();
+      if (mounted) {
         setState(() {
-          _profileImages[id] = img;
+          _profileImages[id] = frame.image;
           _imageVersion++;
         });
       }
     } catch (_) {
-      // silently ignore — node will show emoji fallback
+      // silently ignore — node shows kanji/emoji fallback
     }
   }
 
@@ -454,6 +460,16 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget> {
       ),
       textDirection: TextDirection.ltr,
     )..layout();
+  }
+
+  static double _springMult(RelationshipLevel l) {
+    switch (l) {
+      case RelationshipLevel.bestFriend:   return 2.8;
+      case RelationshipLevel.closeFriend:  return 1.8;
+      case RelationshipLevel.friend:       return 1.0;
+      case RelationshipLevel.familiar:     return 0.5;
+      case RelationshipLevel.acquaintance: return 0.25;
+    }
   }
 
   double _baseRadiusFor(User u) {
@@ -662,12 +678,15 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget> {
 // ---------------- Force-directed Layout ----------------
 
 class _FRLayout {
+  // edges: (fromIdx, toIdx, springMultiplier)
+  // springMultiplier > 1 = stronger pull (bestFriend) → nodes end up closer;
+  // springMultiplier < 1 = weaker pull (acquaintance) → nodes drift further apart.
   static (List<double>, List<double>) compute2D({
     required int n,
     required int selfIdx,
-    required List<List<int>> edges,
+    required List<(int, int, double)> edges,
     required double shortSide,
-    int iterations = 90,
+    int iterations = 100,
   }) {
     final rng = Random(42);
     final px = List<double>.filled(n, 0);
@@ -676,15 +695,16 @@ class _FRLayout {
     for (int i = 0; i < n; i++) {
       if (i == selfIdx) continue;
       final angle = 2 * pi * i / max(n - 1, 1) + rng.nextDouble() * 0.4;
-      final r = shortSide * (0.14 + rng.nextDouble() * 0.20);
+      final r = shortSide * (0.15 + rng.nextDouble() * 0.18);
       px[i] = r * cos(angle);
       py[i] = r * sin(angle);
     }
 
     final area = shortSide * shortSide;
-    final k = sqrt(area / max(n, 4)) * 0.85;
-    final minDist = 36.0;
-    double temp = shortSide * 0.08;
+    final k = sqrt(area / max(n, 4)) * 0.9;
+    // Minimum gap: 50 px covers the worst case (self r=26 + direct r=19 + 5px pad).
+    const double minGap = 50.0;
+    double temp = shortSide * 0.09;
 
     final fx = List<double>.filled(n, 0);
     final fy = List<double>.filled(n, 0);
@@ -695,20 +715,22 @@ class _FRLayout {
         fy[i] = 0;
       }
 
+      // ---- Repulsion: all pairs ----
       for (int i = 0; i < n; i++) {
         for (int j = i + 1; j < n; j++) {
           double dx = px[i] - px[j];
           double dy = py[i] - py[j];
           double dist = sqrt(dx * dx + dy * dy);
           if (dist < 0.5) {
-            dx = (rng.nextDouble() - 0.5) * 5;
-            dy = (rng.nextDouble() - 0.5) * 5;
+            dx = (rng.nextDouble() - 0.5) * 6;
+            dy = (rng.nextDouble() - 0.5) * 6;
             dist = sqrt(dx * dx + dy * dy);
             if (dist < 0.01) dist = 0.01;
           }
           final invDist = 1 / dist;
+          // Coulomb repulsion + hard spring when too close
           var force = (k * k) * invDist;
-          if (dist < minDist) force += (minDist - dist) * 8;
+          if (dist < minGap) force += (minGap - dist) * 14;
           final ux = dx * invDist;
           final uy = dy * invDist;
           fx[i] += ux * force;
@@ -718,14 +740,15 @@ class _FRLayout {
         }
       }
 
-      for (final e in edges) {
-        final i = e[0], j = e[1];
+      // ---- Attraction: relationship-weighted spring ----
+      for (final (i, j, mult) in edges) {
         final dx = px[i] - px[j];
         final dy = py[i] - py[j];
         double dist = sqrt(dx * dx + dy * dy);
         if (dist < 1) dist = 1;
         final invDist = 1 / dist;
-        final force = (dist * dist) / k;
+        // mult > 1 amplifies pull → equilibrium distance shrinks
+        final force = (dist * dist) / k * mult;
         final ux = dx * invDist;
         final uy = dy * invDist;
         fx[i] -= ux * force;
@@ -734,18 +757,16 @@ class _FRLayout {
         fy[j] += uy * force;
       }
 
+      // ---- Weak gravity toward origin ----
       for (int i = 0; i < n; i++) {
         if (i == selfIdx) continue;
         fx[i] -= px[i] * 0.006;
         fy[i] -= py[i] * 0.006;
       }
 
+      // ---- Apply clamped displacement ----
       for (int i = 0; i < n; i++) {
-        if (i == selfIdx) {
-          px[i] = 0;
-          py[i] = 0;
-          continue;
-        }
+        if (i == selfIdx) { px[i] = 0; py[i] = 0; continue; }
         final mag = sqrt(fx[i] * fx[i] + fy[i] * fy[i]);
         if (mag < 0.001) continue;
         final clamped = min(mag, temp);
@@ -753,15 +774,53 @@ class _FRLayout {
         py[i] += fy[i] / mag * clamped;
       }
 
-      temp = max(temp * 0.965, 0.4);
+      temp = max(temp * 0.96, 0.4);
     }
+
+    // ---- Post-process: guarantee no two nodes overlap ----
+    // Iterative separation passes: push overlapping pairs apart until resolved.
+    for (int pass = 0; pass < 120; pass++) {
+      bool anyOverlap = false;
+      for (int i = 0; i < n; i++) {
+        for (int j = i + 1; j < n; j++) {
+          final dx = px[i] - px[j];
+          final dy = py[i] - py[j];
+          final d = sqrt(dx * dx + dy * dy);
+          if (d < minGap && d > 0.01) {
+            final push = (minGap - d) * 0.55;
+            final nx = dx / d;
+            final ny = dy / d;
+            // Keep self anchored at origin; push the other node harder.
+            if (i == selfIdx) {
+              px[j] -= nx * push * 2;
+              py[j] -= ny * push * 2;
+            } else if (j == selfIdx) {
+              px[i] += nx * push * 2;
+              py[i] += ny * push * 2;
+            } else {
+              px[i] += nx * push;
+              py[i] += ny * push;
+              px[j] -= nx * push;
+              py[j] -= ny * push;
+            }
+            anyOverlap = true;
+          }
+        }
+      }
+      if (!anyOverlap) break;
+    }
+
+    // Re-anchor self (separation passes may have drifted it slightly).
+    px[selfIdx] = 0;
+    py[selfIdx] = 0;
+
     return (px, py);
   }
 
   static (List<double>, List<double>, List<double>) compute3D({
     required int n,
     required int selfIdx,
-    required List<List<int>> edges,
+    required List<(int, int, double)> edges,
     required double shortSide,
     int iterations = 90,
   }) {
@@ -825,15 +884,14 @@ class _FRLayout {
         }
       }
 
-      for (final e in edges) {
-        final i = e[0], j = e[1];
+      for (final (i, j, mult) in edges) {
         final dx = px[i] - px[j];
         final dy = py[i] - py[j];
         final dz = pz[i] - pz[j];
         double dist = sqrt(dx * dx + dy * dy + dz * dz);
         if (dist < 1) dist = 1;
         final invDist = 1 / dist;
-        final force = (dist * dist) / k;
+        final force = (dist * dist) / k * mult;
         final ux = dx * invDist;
         final uy = dy * invDist;
         final uz = dz * invDist;
