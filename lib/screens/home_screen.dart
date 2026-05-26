@@ -100,6 +100,7 @@ class _HomeScreenState extends State<HomeScreen> {
             users: visible.users,
             connections: visible.connections,
             is3D: _is3D,
+            useConcentricLayout: true,
             fadeNonDirect: true,
             showEdges: true,
             onNodeLongPress: _onNodeLongPress,

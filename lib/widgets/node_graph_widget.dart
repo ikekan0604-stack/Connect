@@ -21,6 +21,8 @@ class _WorldNode {
   final User user;
   final double baseRadius;
   final double wx, wy, wz;
+  /// BFS ring depth from current center in concentric mode; -1 otherwise.
+  final int ringDepth;
   // Pre-built at layout time — never recreated during rotation
   final TextPainter emojiPainter;
   final TextPainter? namePainter; // null when baseRadius < 11
@@ -31,6 +33,7 @@ class _WorldNode {
     required this.wx,
     required this.wy,
     required this.wz,
+    this.ringDepth = -1,
     required this.emojiPainter,
     this.namePainter,
   });
@@ -46,7 +49,10 @@ class _WorldEdge {
   final int toIdx;
   final double thickness;
   final double opacity;
-  const _WorldEdge(this.fromIdx, this.toIdx, this.thickness, this.opacity);
+  /// True when both endpoints are in ring 0 or ring 1 (concentric mode).
+  final bool isPrimary;
+  const _WorldEdge(this.fromIdx, this.toIdx, this.thickness, this.opacity,
+      {this.isPrimary = false});
 }
 
 // ---------------- View transform state (Listenable) ----------------
@@ -134,6 +140,9 @@ class NodeGraphWidget extends StatefulWidget {
   final List<User> users;
   final List<Connection> connections;
   final bool is3D;
+  /// When true, 2D layout uses concentric rings centered on the tapped node.
+  /// Home tab only — sort tab uses the default force-directed layout.
+  final bool useConcentricLayout;
   final bool fadeNonDirect;
   final List<String>? highlightedIds;
   final bool showEdges;
@@ -147,6 +156,7 @@ class NodeGraphWidget extends StatefulWidget {
     required this.users,
     required this.connections,
     required this.is3D,
+    this.useConcentricLayout = false,
     this.fadeNonDirect = false,
     this.highlightedIds,
     this.showEdges = true,
@@ -174,6 +184,9 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
   // Profile images loaded from network — keyed by user.id
   final Map<String, ui.Image> _profileImages = {};
   int _imageVersion = 0;
+
+  // ---- Concentric ring depths (populated by _buildLayout in concentric mode) ----
+  final Map<String, int> _ringDepthById = {};
 
   // ---- Center-change feature ----
   /// Id of the user currently at the visual center of the 2D graph.
@@ -261,9 +274,9 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
     // _buildLayout will be scheduled in build() when _lastCenterId != _centerId.
   }
 
-  /// Single-tap handler: recenter in 2D; no-op in 3D.
+  /// Single-tap handler: recenter in concentric 2D mode; no-op otherwise.
   void _handleTap(Offset pos) {
-    if (widget.is3D) return;
+    if (!widget.useConcentricLayout || widget.is3D) return;
     final hit = _hitTest(pos);
     if (hit == null) return;
     _setCenterId(hit.user.id);
@@ -279,7 +292,7 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
   /// Filter / highlight changes are NOT included.
   String _computePositionSig() {
     final ids = widget.users.map((u) => u.id).join(',');
-    return '${widget.is3D}|$ids|${widget.users.length}';
+    return '${widget.is3D}|${widget.useConcentricLayout}|$ids|${widget.users.length}';
   }
 
   /// Sig for edge list (cheap to recompute).
@@ -306,6 +319,9 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
     }
     if (old.resetSignal != widget.resetSignal) {
       _view.reset();
+      if (widget.useConcentricLayout && _centerId != 'self') {
+        setState(() => _centerId = 'self');
+      }
     }
   }
 
@@ -324,11 +340,16 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
         final a = idIdx[c.userId1];
         final b = idIdx[c.userId2];
         if (a == null || b == null) continue;
+        final dA = _ringDepthById[c.userId1] ?? -1;
+        final dB = _ringDepthById[c.userId2] ?? -1;
+        final isPrimary = widget.useConcentricLayout &&
+            dA >= 0 && dA <= 1 && dB >= 0 && dB <= 1;
         worldEdges.add(_WorldEdge(
           a,
           b,
           _edgeThickness(c.level),
           _edgeOpacity(c.level),
+          isPrimary: isPrimary,
         ));
       }
     }
@@ -385,6 +406,8 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
     final shortSide = max(min(size.width, size.height), 200.0);
 
     List<double> px, py, pz;
+    List<int> ringDepths = List<int>.filled(n, -1);
+
     if (widget.is3D) {
       final r = _FRLayout.compute3D(
         n: n,
@@ -395,8 +418,8 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
       px = r.$1;
       py = r.$2;
       pz = r.$3;
-    } else {
-      // Concentric/radial layout centred on _centerId.
+    } else if (widget.useConcentricLayout) {
+      // Concentric/radial layout centred on _centerId — home tab only.
       final userIds = [for (final u in ordered) u.id];
       final r = _FRLayout.computeConcentric(
         n: n,
@@ -408,18 +431,39 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
       px = r.$1;
       py = r.$2;
       pz = List<double>.filled(n, 0);
+      ringDepths = r.$3;
+    } else {
+      // Force-directed 2D layout — sort tab.
+      final r = _FRLayout.compute2D(
+        n: n,
+        selfIdx: 0,
+        edges: fEdges,
+        shortSide: shortSide,
+      );
+      px = r.$1;
+      py = r.$2;
+      pz = List<double>.filled(n, 0);
+    }
+
+    // Update ring depth index for edge marking.
+    _ringDepthById.clear();
+    for (int i = 0; i < n; i++) {
+      _ringDepthById[ordered[i].id] = ringDepths[i];
     }
 
     final worldNodes = <_WorldNode>[];
     for (int i = 0; i < n; i++) {
       final u = ordered[i];
-      final r = _baseRadiusFor(u);
+      final r = (widget.useConcentricLayout && !widget.is3D)
+          ? _radiusForRing(ringDepths[i])
+          : _baseRadiusFor(u);
       worldNodes.add(_WorldNode(
         user: u,
         baseRadius: r,
         wx: px[i],
         wy: py[i],
         wz: pz[i],
+        ringDepth: ringDepths[i],
         emojiPainter: _buildEmojiPainter(u.emoji, r),
         namePainter: r >= 11 ? _buildNamePainter(u.name, r) : null,
       ));
@@ -435,11 +479,16 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
         final a = idIdx[c.userId1];
         final b = idIdx[c.userId2];
         if (a == null || b == null) continue;
+        final dA = ringDepths[a];
+        final dB = ringDepths[b];
+        final isPrimary = widget.useConcentricLayout &&
+            dA >= 0 && dA <= 1 && dB >= 0 && dB <= 1;
         worldEdges.add(_WorldEdge(
           a,
           b,
           _edgeThickness(c.level),
           _edgeOpacity(c.level),
+          isPrimary: isPrimary,
         ));
       }
     }
@@ -543,6 +592,15 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
     if (u.id == 'self') return 26;
     if (u.isDirect) return 19;
     return 12;
+  }
+
+  /// Node radius based on BFS ring depth in concentric layout.
+  static double _radiusForRing(int depth) {
+    if (depth <= 0) return 26;
+    if (depth == 1) return 20;
+    if (depth == 2) return 13;
+    if (depth == 3) return 10;
+    return 8;
   }
 
   bool _isPrimary(User u) {
@@ -717,7 +775,7 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
     return LayoutBuilder(builder: (_, constraints) {
       final size = constraints.biggest;
       final validSize = size.width >= 50 && size.height >= 50;
-      final centerChanged = _lastCenterId != _centerId;
+      final centerChanged = widget.useConcentricLayout && _lastCenterId != _centerId;
       if (validSize && (_worldNodes.isEmpty || _lastSize != size || centerChanged)) {
         if (centerChanged) _lastCenterId = _centerId;
         WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -739,6 +797,7 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
               worldNodes: _worldNodes,
               worldEdges: _worldEdges,
               is3D: widget.is3D,
+              useConcentricLayout: widget.useConcentricLayout,
               fadeNonDirect: widget.fadeNonDirect,
               highlightedIds: widget.highlightedIds,
               showEdges: widget.showEdges,
@@ -766,7 +825,7 @@ class _FRLayout {
   //
   // edges: (fromIdx, toIdx, springMult) — mult is ignored here; only
   // connectivity matters for BFS.
-  static (List<double>, List<double>) computeConcentric({
+  static (List<double>, List<double>, List<int>) computeConcentric({
     required int n,
     required List<String> userIds,
     required String centerId,
@@ -815,6 +874,9 @@ class _FRLayout {
     if (isolated.isNotEmpty) {
       final maxRing = rings.keys.reduce(max) + 1;
       rings[maxRing] = isolated;
+      for (final i in isolated) {
+        ringOf[i] = maxRing;
+      }
     }
 
     // ---- Place each ring concentrically ----
@@ -848,7 +910,7 @@ class _FRLayout {
       prevRadius = radius;
     }
 
-    return (px, py);
+    return (px, py, ringOf);
   }
 
 
@@ -1113,6 +1175,7 @@ class _GraphPainter extends CustomPainter {
   final List<_WorldNode> worldNodes;
   final List<_WorldEdge> worldEdges;
   final bool is3D;
+  final bool useConcentricLayout;
   final bool fadeNonDirect;
   final List<String>? highlightedIds;
   final bool showEdges;
@@ -1141,6 +1204,7 @@ class _GraphPainter extends CustomPainter {
     required this.worldNodes,
     required this.worldEdges,
     required this.is3D,
+    required this.useConcentricLayout,
     required this.fadeNonDirect,
     required this.highlightedIds,
     required this.showEdges,
@@ -1212,9 +1276,19 @@ class _GraphPainter extends CustomPainter {
     if (showEdges) {
       for (final e in worldEdges) {
         if (e.fromIdx >= n || e.toIdx >= n) continue;
+        double alpha = e.opacity;
+        double width = e.thickness;
+        if (useConcentricLayout && !is3D) {
+          if (e.isPrimary) {
+            alpha = (e.opacity * 2.4).clamp(0.0, 0.82);
+            width = e.thickness * 1.7;
+          } else {
+            alpha = e.opacity * 0.20;
+          }
+        }
         _edgePaint
-          ..color = Colors.white.withValues(alpha: e.opacity)
-          ..strokeWidth = e.thickness;
+          ..color = Colors.white.withValues(alpha: alpha)
+          ..strokeWidth = width;
         canvas.drawLine(posList[e.fromIdx], posList[e.toIdx], _edgePaint);
       }
     }
@@ -1259,30 +1333,54 @@ class _GraphPainter extends CustomPainter {
 
   void _drawNode(Canvas canvas, _WorldNode node, Offset pos, double r) {
     final isSelf = node.user.id == 'self';
-    final primary = _isPrimary(node.user);
-    final highlighted =
-        highlightedIds == null || highlightedIds!.contains(node.user.id);
 
     Color fill;
-    if (isSelf) {
-      fill = Colors.white;
-    } else if (!primary) {
-      fill = _desaturate(node.user.nodeColor, 1.0);
-    } else {
-      fill = node.user.nodeColor;
-    }
-
     double globalOpacity;
-    if (!highlighted) {
-      globalOpacity = 0.18;
-    } else if (!primary) {
-      globalOpacity = 0.45;
+    bool showGlow;
+
+    if (useConcentricLayout && !is3D && node.ringDepth >= 0) {
+      // Ring-depth-based emphasis (home tab concentric mode).
+      fill = isSelf ? Colors.white : node.user.nodeColor;
+      final depth = node.ringDepth;
+      if (depth <= 1) {
+        globalOpacity = 1.0;
+        showGlow = true;
+      } else if (depth == 2) {
+        globalOpacity = 0.50;
+        showGlow = false;
+      } else if (depth == 3) {
+        globalOpacity = 0.24;
+        showGlow = false;
+      } else {
+        globalOpacity = 0.12;
+        showGlow = false;
+      }
     } else {
-      globalOpacity = 1.0;
+      // Existing fade-non-direct / highlight logic.
+      final primary = _isPrimary(node.user);
+      final highlighted =
+          highlightedIds == null || highlightedIds!.contains(node.user.id);
+
+      if (isSelf) {
+        fill = Colors.white;
+      } else if (!primary) {
+        fill = _desaturate(node.user.nodeColor, 1.0);
+      } else {
+        fill = node.user.nodeColor;
+      }
+
+      if (!highlighted) {
+        globalOpacity = 0.18;
+      } else if (!primary) {
+        globalOpacity = 0.45;
+      } else {
+        globalOpacity = 1.0;
+      }
+      showGlow = primary && highlighted;
     }
 
     // Soft glow via layered circles — no MaskFilter.blur, much cheaper.
-    if (primary && highlighted) {
+    if (showGlow) {
       final glowColor = isSelf ? Colors.white : fill;
       _glowPaint.color = glowColor.withValues(alpha: 0.05 * globalOpacity);
       canvas.drawCircle(pos, r * 3.0, _glowPaint);
@@ -1308,8 +1406,8 @@ class _GraphPainter extends CustomPainter {
       ep.paint(canvas, pos - Offset(ep.width / 2, ep.height / 2));
     }
 
-    // Name — only for primary nodes with enough opacity.
-    if (primary && globalOpacity > 0.5 && node.namePainter != null) {
+    // Name label below the node.
+    if (globalOpacity > 0.5 && node.namePainter != null) {
       final np = node.namePainter!;
       np.paint(canvas, Offset(pos.dx - np.width / 2, pos.dy + r + 4));
     }
@@ -1345,6 +1443,7 @@ class _GraphPainter extends CustomPainter {
       old.worldNodes != worldNodes ||
       old.worldEdges != worldEdges ||
       old.is3D != is3D ||
+      old.useConcentricLayout != useConcentricLayout ||
       old.fadeNonDirect != fadeNonDirect ||
       old.highlightedIds != highlightedIds ||
       old.showEdges != showEdges ||
