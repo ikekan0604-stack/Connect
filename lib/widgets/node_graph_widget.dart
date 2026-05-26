@@ -972,7 +972,9 @@ class _GraphPainter extends CustomPainter {
 
     // Depth-sort indices (farther first) for 3D
     final order = List<int>.generate(n, (i) => i);
-    if (is3D) order.sort((a, b) => depths[a].compareTo(depths[b]));
+    // Descending z2: larger z2 = farther from camera → draw first (painter's algorithm).
+    // Smaller z2 = closer (perspective scale s is larger) → draw last, on top.
+    if (is3D) order.sort((a, b) => depths[b].compareTo(depths[a]));
 
     for (final i in order) {
       _drawNode(canvas, worldNodes[i], posList[i], radList[i]);
