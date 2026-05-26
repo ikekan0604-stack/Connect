@@ -589,18 +589,18 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
   }
 
   double _baseRadiusFor(User u) {
-    if (u.id == 'self') return 26;
-    if (u.isDirect) return 19;
-    return 12;
+    if (u.id == 'self') return 22;
+    if (u.isDirect) return 16;
+    return 10;
   }
 
   /// Node radius based on BFS ring depth in concentric layout.
   static double _radiusForRing(int depth) {
-    if (depth <= 0) return 26;
-    if (depth == 1) return 20;
-    if (depth == 2) return 13;
-    if (depth == 3) return 10;
-    return 8;
+    if (depth <= 0) return 22;
+    if (depth == 1) return 17;
+    if (depth == 2) return 11;
+    if (depth == 3) return 9;
+    return 7;
   }
 
   bool _isPrimary(User u) {
@@ -881,10 +881,10 @@ class _FRLayout {
 
     // ---- Place each ring concentrically ----
     // Minimum radius gap between adjacent rings.
-    const double ringGap = 88.0;
+    const double ringGap = 108.0;
     // Minimum arc-length per node (covers the node diameter + small padding).
-    const double nodeArcDirect = 50.0; // for ring 1 (larger nodes)
-    const double nodeArcOther  = 38.0; // for rings 2+
+    const double nodeArcDirect = 58.0; // for ring 1 (larger nodes)
+    const double nodeArcOther  = 44.0; // for rings 2+
 
     double prevRadius = 0;
     final sortedKeys = rings.keys.toList()..sort();
@@ -931,13 +931,13 @@ class _FRLayout {
     for (int i = 0; i < n; i++) {
       if (i == selfIdx) continue;
       final angle = 2 * pi * i / max(n - 1, 1) + rng.nextDouble() * 0.4;
-      final r = shortSide * (0.15 + rng.nextDouble() * 0.18);
+      final r = shortSide * (0.22 + rng.nextDouble() * 0.24);
       px[i] = r * cos(angle);
       py[i] = r * sin(angle);
     }
 
     final area = shortSide * shortSide;
-    final k = sqrt(area / max(n, 4)) * 0.9;
+    final k = sqrt(area / max(n, 4)) * 1.4;
     // Minimum gap: 50 px covers the worst case (self r=26 + direct r=19 + 5px pad).
     const double minGap = 50.0;
     double temp = shortSide * 0.09;
@@ -996,8 +996,8 @@ class _FRLayout {
       // ---- Weak gravity toward origin ----
       for (int i = 0; i < n; i++) {
         if (i == selfIdx) continue;
-        fx[i] -= px[i] * 0.006;
-        fy[i] -= py[i] * 0.006;
+        fx[i] -= px[i] * 0.003;
+        fy[i] -= py[i] * 0.003;
       }
 
       // ---- Apply clamped displacement ----
@@ -1382,10 +1382,10 @@ class _GraphPainter extends CustomPainter {
     // Soft glow via layered circles — no MaskFilter.blur, much cheaper.
     if (showGlow) {
       final glowColor = isSelf ? Colors.white : fill;
-      _glowPaint.color = glowColor.withValues(alpha: 0.05 * globalOpacity);
-      canvas.drawCircle(pos, r * 3.0, _glowPaint);
-      _glowPaint.color = glowColor.withValues(alpha: 0.12 * globalOpacity);
-      canvas.drawCircle(pos, r * 1.7, _glowPaint);
+      _glowPaint.color = glowColor.withValues(alpha: 0.06 * globalOpacity);
+      canvas.drawCircle(pos, r * 1.9, _glowPaint);
+      _glowPaint.color = glowColor.withValues(alpha: 0.14 * globalOpacity);
+      canvas.drawCircle(pos, r * 1.4, _glowPaint);
     }
 
     _fillPaint.color = fill.withValues(alpha: globalOpacity);
