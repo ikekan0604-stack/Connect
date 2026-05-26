@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "connect-web",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "http.server", "8081"],
+      "cwd": "build/web",
+      "port": 8081
+    }
+  ]
+}
