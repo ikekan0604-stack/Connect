@@ -159,7 +159,8 @@ class NodeGraphWidget extends StatefulWidget {
   State<NodeGraphWidget> createState() => _NodeGraphWidgetState();
 }
 
-class _NodeGraphWidgetState extends State<NodeGraphWidget> {
+class _NodeGraphWidgetState extends State<NodeGraphWidget>
+    with SingleTickerProviderStateMixin {
   static const double _fov = 460.0;
 
   late List<_Star> _stars;
@@ -173,6 +174,20 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget> {
   // Profile images loaded from network — keyed by user.id
   final Map<String, ui.Image> _profileImages = {};
   int _imageVersion = 0;
+
+  // ---- Center-change feature ----
+  /// Id of the user currently at the visual center of the 2D graph.
+  String _centerId = 'self';
+  /// Tracks the last center we built layout for (triggers rebuild on change).
+  String _lastCenterId = 'self';
+  /// True while a center-change-triggered rebuild is pending.
+  bool _animPending = false;
+  /// Previous 2D positions to interpolate FROM during the recenter animation.
+  final Map<String, Offset> _animFrom = {};
+  /// Drives the recenter animation (0 → 1 = old positions → new positions).
+  late AnimationController _animCtrl;
+  /// Eased animation progress exposed to the painter via ValueNotifier.
+  final ValueNotifier<double> _animT = ValueNotifier(1.0);
 
   // Listener-based gesture state (avoids gesture arena — fixes Flutter web button taps)
   final Map<int, Offset> _pointers = {};
@@ -190,15 +205,25 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget> {
   void initState() {
     super.initState();
     _stars = _generateStars(60);
-    // Rebuild layout when system fonts finish loading so emoji/kanji icons
-    // render correctly on the very first frame (especially on iOS web).
     PaintingBinding.instance.systemFonts.addListener(_onFontsLoaded);
+
+    _animCtrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 600),
+    );
+    _animCtrl.addListener(() {
+      // Ease-out cubic: fast start, gentle landing.
+      final t = _animCtrl.value;
+      _animT.value = 1 - (1 - t) * (1 - t) * (1 - t);
+    });
   }
 
   @override
   void dispose() {
     PaintingBinding.instance.systemFonts.removeListener(_onFontsLoaded);
     _longPressTimer?.cancel();
+    _animCtrl.dispose();
+    _animT.dispose();
     _disposeNodeList(_worldNodes);
     for (final img in _profileImages.values) {
       img.dispose();
@@ -211,6 +236,37 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget> {
     if (mounted && _lastSize != Size.zero) {
       _buildLayout(_lastSize);
     }
+  }
+
+  // ---------------- Center-change (tap-to-recenter) ----------------
+
+  /// Switch the visual center to [newId] and smoothly animate the graph.
+  void _setCenterId(String newId) {
+    if (newId == _centerId) {
+      // Tapping the current center → return to self.
+      if (_centerId == 'self') return;
+      newId = 'self';
+    }
+    // Snapshot current world positions as animation start.
+    _animFrom.clear();
+    for (final n in _worldNodes) {
+      _animFrom[n.user.id] = Offset(n.wx, n.wy);
+    }
+    _animT.value = 0.0;
+    _animCtrl.reset();
+    _animPending = true;
+    setState(() {
+      _centerId = newId;
+    });
+    // _buildLayout will be scheduled in build() when _lastCenterId != _centerId.
+  }
+
+  /// Single-tap handler: recenter in 2D; no-op in 3D.
+  void _handleTap(Offset pos) {
+    if (widget.is3D) return;
+    final hit = _hitTest(pos);
+    if (hit == null) return;
+    _setCenterId(hit.user.id);
   }
 
   void _disposeNodeList(List<_WorldNode> nodes) {
@@ -340,9 +396,12 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget> {
       py = r.$2;
       pz = r.$3;
     } else {
-      final r = _FRLayout.compute2D(
+      // Concentric/radial layout centred on _centerId.
+      final userIds = [for (final u in ordered) u.id];
+      final r = _FRLayout.computeConcentric(
         n: n,
-        selfIdx: 0,
+        userIds: userIds,
+        centerId: _centerId,
         edges: fEdges,
         shortSide: shortSide,
       );
@@ -395,6 +454,14 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget> {
 
     // Kick off network image loads for any nodes that have an imageUrl.
     _loadProfileImages(worldNodes);
+
+    // If this layout was triggered by a center change, start the position animation.
+    if (_animPending) {
+      _animPending = false;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _animCtrl.forward();
+      });
+    }
   }
 
   // ---------------- Network image loading ----------------
@@ -606,16 +673,25 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget> {
     _prevDist = _dist();
   }
 
-  void _handlePointerUp(PointerUpEvent e) => _removePointer(e.pointer);
+  void _handlePointerUp(PointerUpEvent e) => _removePointer(e.pointer, tap: true);
   void _handlePointerCancel(PointerCancelEvent e) => _removePointer(e.pointer);
 
-  void _removePointer(int id) {
+  void _removePointer(int id, {bool tap = false}) {
+    final wasSinglePointer = _pointers.length == 1;
+    final timerStillActive = _longPressTimer?.isActive ?? false;
+    final origin = _longPressOrigin;
+
     _pointers.remove(id);
+
     if (_pointers.isEmpty) {
       _longPressTimer?.cancel();
       _longPressOrigin = null;
       _prevFocal = null;
       _prevDist = null;
+      // Single-pointer quick release with no movement → single tap
+      if (tap && wasSinglePointer && timerStillActive && origin != null) {
+        _handleTap(origin);
+      }
     } else {
       _prevFocal = _focal();
       _prevDist = _dist();
@@ -641,7 +717,9 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget> {
     return LayoutBuilder(builder: (_, constraints) {
       final size = constraints.biggest;
       final validSize = size.width >= 50 && size.height >= 50;
-      if (validSize && (_worldNodes.isEmpty || _lastSize != size)) {
+      final centerChanged = _lastCenterId != _centerId;
+      if (validSize && (_worldNodes.isEmpty || _lastSize != size || centerChanged)) {
+        if (centerChanged) _lastCenterId = _centerId;
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) _buildLayout(size);
         });
@@ -667,6 +745,8 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget> {
               view: _view,
               profileImages: _profileImages,
               imageVersion: _imageVersion,
+              animFrom: _animFrom,
+              animT: _animT,
             ),
           ),
         ),
@@ -678,6 +758,100 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget> {
 // ---------------- Force-directed Layout ----------------
 
 class _FRLayout {
+  // ---- Concentric / radial layout (replaces FR for 2D) ----
+  //
+  // Runs BFS from [centerId], assigns each node to a ring, then places
+  // ring nodes evenly on circles.  Ring radii adapt to node count so
+  // nodes never crowd each other.
+  //
+  // edges: (fromIdx, toIdx, springMult) — mult is ignored here; only
+  // connectivity matters for BFS.
+  static (List<double>, List<double>) computeConcentric({
+    required int n,
+    required List<String> userIds,
+    required String centerId,
+    required List<(int, int, double)> edges,
+    required double shortSide,
+  }) {
+    final px = List<double>.filled(n, 0.0);
+    final py = List<double>.filled(n, 0.0);
+    final idToIdx = <String, int>{
+      for (int i = 0; i < n; i++) userIds[i]: i,
+    };
+
+    final centerIdx = idToIdx[centerId] ?? 0;
+
+    // Build adjacency list.
+    final adj = List<List<int>>.generate(n, (_) => <int>[]);
+    for (final (i, j, _) in edges) {
+      adj[i].add(j);
+      adj[j].add(i);
+    }
+
+    // BFS from center → assign ring number.
+    final ringOf = List<int>.filled(n, -1);
+    ringOf[centerIdx] = 0;
+    final queue = <int>[centerIdx];
+    // rings[k] = list of node indices at BFS depth k.
+    final rings = <int, List<int>>{0: [centerIdx]};
+
+    while (queue.isNotEmpty) {
+      final cur = queue.removeAt(0);
+      final d = ringOf[cur];
+      for (final nb in adj[cur]) {
+        if (ringOf[nb] == -1) {
+          ringOf[nb] = d + 1;
+          queue.add(nb);
+          rings.putIfAbsent(d + 1, () => <int>[]).add(nb);
+        }
+      }
+    }
+
+    // Orphans (disconnected from center) go in the outermost ring.
+    final isolated = <int>[];
+    for (int i = 0; i < n; i++) {
+      if (ringOf[i] == -1) isolated.add(i);
+    }
+    if (isolated.isNotEmpty) {
+      final maxRing = rings.keys.reduce(max) + 1;
+      rings[maxRing] = isolated;
+    }
+
+    // ---- Place each ring concentrically ----
+    // Minimum radius gap between adjacent rings.
+    const double ringGap = 88.0;
+    // Minimum arc-length per node (covers the node diameter + small padding).
+    const double nodeArcDirect = 50.0; // for ring 1 (larger nodes)
+    const double nodeArcOther  = 38.0; // for rings 2+
+
+    double prevRadius = 0;
+    final sortedKeys = rings.keys.toList()..sort();
+
+    for (final ring in sortedKeys) {
+      if (ring == 0) continue; // center stays at (0, 0)
+      final nodes = rings[ring]!;
+
+      // Sort by index for deterministic, stable ordering.
+      nodes.sort();
+
+      final arc = ring == 1 ? nodeArcDirect : nodeArcOther;
+      final minByArc = nodes.length * arc / (2 * pi);
+      final radius = max(prevRadius + ringGap, minByArc);
+
+      // Distribute nodes evenly starting from top (−π/2).
+      for (int i = 0; i < nodes.length; i++) {
+        final angle = 2 * pi * i / nodes.length - pi / 2;
+        px[nodes[i]] = radius * cos(angle);
+        py[nodes[i]] = radius * sin(angle);
+      }
+
+      prevRadius = radius;
+    }
+
+    return (px, py);
+  }
+
+
   // edges: (fromIdx, toIdx, springMultiplier)
   // springMultiplier > 1 = stronger pull (bestFriend) → nodes end up closer;
   // springMultiplier < 1 = weaker pull (acquaintance) → nodes drift further apart.
@@ -945,6 +1119,10 @@ class _GraphPainter extends CustomPainter {
   final GraphViewState view;
   final Map<String, ui.Image> profileImages;
   final int imageVersion;
+  /// Previous 2D positions for recenter animation (empty when not animating).
+  final Map<String, Offset> animFrom;
+  /// Drives the recenter animation: 0 = old positions, 1 = new positions.
+  final ValueNotifier<double> animT;
 
   // Cached paint objects — allocated once per painter, mutated per draw call.
   final _fillPaint = Paint();
@@ -969,7 +1147,9 @@ class _GraphPainter extends CustomPainter {
     required this.view,
     required this.profileImages,
     required this.imageVersion,
-  }) : super(repaint: view);
+    required this.animFrom,
+    required this.animT,
+  }) : super(repaint: Listenable.merge([view, animT]));
 
   bool _isPrimary(User u) {
     if (!fadeNonDirect) return true;
@@ -1010,9 +1190,20 @@ class _GraphPainter extends CustomPainter {
         depths[i] = z2;
       }
     } else {
+      // 2D: optionally interpolate from previous positions (recenter animation).
+      final t = animT.value;
+      final animating = t < 1.0 && animFrom.isNotEmpty;
       for (int i = 0; i < n; i++) {
         final node = worldNodes[i];
-        posList[i] = Offset(cx + node.wx, cy + node.wy);
+        double wx = node.wx, wy = node.wy;
+        if (animating) {
+          final from = animFrom[node.user.id];
+          if (from != null) {
+            wx = ui.lerpDouble(from.dx, wx, t)!;
+            wy = ui.lerpDouble(from.dy, wy, t)!;
+          }
+        }
+        posList[i] = Offset(cx + wx, cy + wy);
         radList[i] = node.baseRadius;
         depths[i] = 0;
       }
