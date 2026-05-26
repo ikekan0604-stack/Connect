@@ -38,6 +38,7 @@ final List<User> mockDirectFriends = [
     nodeColor: _muted(8, 0.22, 0.74),
     activityScore: 95,
     isDirect: true,
+    imageUrl: 'https://randomuser.me/api/portraits/men/32.jpg',
   ),
   User(
     id: 'u2',
@@ -50,6 +51,7 @@ final List<User> mockDirectFriends = [
     nodeColor: _muted(175, 0.20, 0.72),
     activityScore: 88,
     isDirect: true,
+    imageUrl: 'https://randomuser.me/api/portraits/men/45.jpg',
   ),
   User(
     id: 'u3',
@@ -62,6 +64,7 @@ final List<User> mockDirectFriends = [
     nodeColor: _muted(335, 0.22, 0.78),
     activityScore: 82,
     isDirect: true,
+    imageUrl: 'https://randomuser.me/api/portraits/women/44.jpg',
   ),
   User(
     id: 'u4',
@@ -74,6 +77,7 @@ final List<User> mockDirectFriends = [
     nodeColor: _muted(28, 0.24, 0.72),
     activityScore: 79,
     isDirect: true,
+    imageUrl: 'https://randomuser.me/api/portraits/men/52.jpg',
   ),
   User(
     id: 'u5',
@@ -86,6 +90,7 @@ final List<User> mockDirectFriends = [
     nodeColor: _muted(290, 0.18, 0.76),
     activityScore: 76,
     isDirect: true,
+    imageUrl: 'https://randomuser.me/api/portraits/women/67.jpg',
   ),
   User(
     id: 'u6',
@@ -98,6 +103,7 @@ final List<User> mockDirectFriends = [
     nodeColor: _muted(140, 0.20, 0.73),
     activityScore: 72,
     isDirect: true,
+    imageUrl: 'https://randomuser.me/api/portraits/men/28.jpg',
   ),
   User(
     id: 'u7',
@@ -110,6 +116,7 @@ final List<User> mockDirectFriends = [
     nodeColor: _muted(200, 0.20, 0.76),
     activityScore: 65,
     isDirect: true,
+    imageUrl: 'https://randomuser.me/api/portraits/women/31.jpg',
   ),
   User(
     id: 'u8',
@@ -122,6 +129,7 @@ final List<User> mockDirectFriends = [
     nodeColor: _muted(50, 0.22, 0.74),
     activityScore: 58,
     isDirect: true,
+    imageUrl: 'https://randomuser.me/api/portraits/men/76.jpg',
   ),
   User(
     id: 'u9',
@@ -134,6 +142,7 @@ final List<User> mockDirectFriends = [
     nodeColor: _muted(355, 0.22, 0.80),
     activityScore: 55,
     isDirect: true,
+    imageUrl: 'https://randomuser.me/api/portraits/women/58.jpg',
   ),
   User(
     id: 'u10',
@@ -146,6 +155,7 @@ final List<User> mockDirectFriends = [
     nodeColor: _muted(190, 0.22, 0.68),
     activityScore: 52,
     isDirect: true,
+    imageUrl: 'https://randomuser.me/api/portraits/men/64.jpg',
   ),
   User(
     id: 'u11',
@@ -158,6 +168,7 @@ final List<User> mockDirectFriends = [
     nodeColor: _muted(265, 0.20, 0.74),
     activityScore: 48,
     isDirect: true,
+    imageUrl: 'https://randomuser.me/api/portraits/women/79.jpg',
   ),
   User(
     id: 'u12',
@@ -170,6 +181,7 @@ final List<User> mockDirectFriends = [
     nodeColor: _muted(25, 0.24, 0.70),
     activityScore: 42,
     isDirect: true,
+    imageUrl: 'https://randomuser.me/api/portraits/men/83.jpg',
   ),
 ];
 
@@ -197,6 +209,7 @@ final List<User> mockIndirectFriends = [
     job: '学生',
     nodeColor: _muted(335, 0.18, 0.78),
     activityScore: 38,
+    imageUrl: 'https://randomuser.me/api/portraits/women/22.jpg',
   ),
   User(
     id: 'i3',
@@ -241,6 +254,7 @@ final List<User> mockIndirectFriends = [
     job: 'アーティスト',
     nodeColor: _muted(310, 0.16, 0.77),
     activityScore: 30,
+    imageUrl: 'https://randomuser.me/api/portraits/women/46.jpg',
   ),
   User(
     id: 'i7',
@@ -252,6 +266,7 @@ final List<User> mockIndirectFriends = [
     job: 'DJ',
     nodeColor: _muted(170, 0.16, 0.72),
     activityScore: 28,
+    imageUrl: 'https://randomuser.me/api/portraits/men/39.jpg',
   ),
   User(
     id: 'i8',

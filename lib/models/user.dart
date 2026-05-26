@@ -79,6 +79,7 @@ class User {
   final Color nodeColor;
   final int activityScore;
   final bool isDirect;
+  final String? imageUrl; // optional profile picture URL
 
   const User({
     required this.id,
@@ -91,6 +92,7 @@ class User {
     required this.nodeColor,
     required this.activityScore,
     this.isDirect = false,
+    this.imageUrl,
   });
 
   User copyWith({
@@ -101,6 +103,7 @@ class User {
     int? age,
     String? job,
     bool? isDirect,
+    String? imageUrl,
   }) {
     return User(
       id: id,
@@ -113,6 +116,7 @@ class User {
       nodeColor: nodeColor,
       activityScore: activityScore,
       isDirect: isDirect ?? this.isDirect,
+      imageUrl: imageUrl ?? this.imageUrl,
     );
   }
 }

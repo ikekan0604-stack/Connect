@@ -167,6 +167,10 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget> {
 
   Size _lastSize = Size.zero;
 
+  // Profile images loaded from network — keyed by user.id
+  final Map<String, ui.Image> _profileImages = {};
+  int _imageVersion = 0;
+
   // Listener-based gesture state (avoids gesture arena — fixes Flutter web button taps)
   final Map<int, Offset> _pointers = {};
   Offset? _prevFocal;
@@ -183,14 +187,27 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget> {
   void initState() {
     super.initState();
     _stars = _generateStars(60);
+    // Rebuild layout when system fonts finish loading so emoji/kanji icons
+    // render correctly on the very first frame (especially on iOS web).
+    PaintingBinding.instance.systemFonts.addListener(_onFontsLoaded);
   }
 
   @override
   void dispose() {
+    PaintingBinding.instance.systemFonts.removeListener(_onFontsLoaded);
     _longPressTimer?.cancel();
     _disposeNodeList(_worldNodes);
+    for (final img in _profileImages.values) {
+      img.dispose();
+    }
     _view.dispose();
     super.dispose();
+  }
+
+  void _onFontsLoaded() {
+    if (mounted && _lastSize != Size.zero) {
+      _buildLayout(_lastSize);
+    }
   }
 
   void _disposeNodeList(List<_WorldNode> nodes) {
@@ -369,6 +386,49 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget> {
     });
     // Dispose after next frame so the old painter finishes its last draw.
     WidgetsBinding.instance.addPostFrameCallback((_) => _disposeNodeList(old));
+
+    // Kick off network image loads for any nodes that have an imageUrl.
+    _loadProfileImages(worldNodes);
+  }
+
+  // ---------------- Network image loading ----------------
+
+  void _loadProfileImages(List<_WorldNode> nodes) {
+    for (final node in nodes) {
+      final url = node.user.imageUrl;
+      if (url == null || url.isEmpty) continue;
+      if (_profileImages.containsKey(node.user.id)) continue; // already loaded
+      _loadNetworkImage(node.user.id, url);
+    }
+  }
+
+  Future<void> _loadNetworkImage(String id, String url) async {
+    try {
+      final completer = Completer<ui.Image?>();
+      final imageProvider = NetworkImage(url);
+      final stream = imageProvider.resolve(ImageConfiguration.empty);
+      late ImageStreamListener listener;
+      listener = ImageStreamListener(
+        (info, _) {
+          if (!completer.isCompleted) completer.complete(info.image);
+          stream.removeListener(listener);
+        },
+        onError: (e, _) {
+          if (!completer.isCompleted) completer.complete(null);
+          stream.removeListener(listener);
+        },
+      );
+      stream.addListener(listener);
+      final img = await completer.future;
+      if (img != null && mounted) {
+        setState(() {
+          _profileImages[id] = img;
+          _imageVersion++;
+        });
+      }
+    } catch (_) {
+      // silently ignore — node will show emoji fallback
+    }
   }
 
   static TextPainter _buildEmojiPainter(String emoji, double r) {
@@ -589,6 +649,8 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget> {
               highlightedIds: widget.highlightedIds,
               showEdges: widget.showEdges,
               view: _view,
+              profileImages: _profileImages,
+              imageVersion: _imageVersion,
             ),
           ),
         ),
@@ -823,6 +885,8 @@ class _GraphPainter extends CustomPainter {
   final List<String>? highlightedIds;
   final bool showEdges;
   final GraphViewState view;
+  final Map<String, ui.Image> profileImages;
+  final int imageVersion;
 
   // Cached paint objects — allocated once per painter, mutated per draw call.
   final _fillPaint = Paint();
@@ -845,6 +909,8 @@ class _GraphPainter extends CustomPainter {
     required this.highlightedIds,
     required this.showEdges,
     required this.view,
+    required this.profileImages,
+    required this.imageVersion,
   }) : super(repaint: view);
 
   bool _isPrimary(User u) {
@@ -981,15 +1047,46 @@ class _GraphPainter extends CustomPainter {
 
     if (globalOpacity < 0.35) return;
 
-    // Emoji — use pre-cached TextPainter; layout() already done at build time.
-    final ep = node.emojiPainter;
-    ep.paint(canvas, pos - Offset(ep.width / 2, ep.height / 2));
+    final profileImg = isSelf ? null : profileImages[node.user.id];
+    if (profileImg != null) {
+      // Draw circular profile photo on top of the filled circle.
+      _drawProfileImage(canvas, profileImg, pos, r, globalOpacity);
+    } else {
+      // Emoji fallback — use pre-cached TextPainter; layout() already done at build time.
+      final ep = node.emojiPainter;
+      ep.paint(canvas, pos - Offset(ep.width / 2, ep.height / 2));
+    }
 
     // Name — only for primary nodes with enough opacity.
     if (primary && globalOpacity > 0.5 && node.namePainter != null) {
       final np = node.namePainter!;
       np.paint(canvas, Offset(pos.dx - np.width / 2, pos.dy + r + 4));
     }
+  }
+
+  void _drawProfileImage(
+      Canvas canvas, ui.Image img, Offset pos, double r, double opacity) {
+    final rect = Rect.fromCircle(center: pos, radius: r);
+    canvas.save();
+    // Clip to circle before drawing the image.
+    canvas.clipPath(Path()..addOval(rect));
+    final paint = Paint()..filterQuality = FilterQuality.low;
+    if (opacity < 1.0) {
+      // Bake opacity into the image via a color-matrix.
+      paint.colorFilter = ColorFilter.matrix([
+        1, 0, 0, 0, 0,
+        0, 1, 0, 0, 0,
+        0, 0, 1, 0, 0,
+        0, 0, 0, opacity, 0,
+      ]);
+    }
+    canvas.drawImageRect(
+      img,
+      Rect.fromLTWH(0, 0, img.width.toDouble(), img.height.toDouble()),
+      rect,
+      paint,
+    );
+    canvas.restore();
   }
 
   @override
@@ -999,5 +1096,6 @@ class _GraphPainter extends CustomPainter {
       old.is3D != is3D ||
       old.fadeNonDirect != fadeNonDirect ||
       old.highlightedIds != highlightedIds ||
-      old.showEdges != showEdges;
+      old.showEdges != showEdges ||
+      old.imageVersion != imageVersion;
 }
