@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math';
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
@@ -164,8 +165,19 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget> {
 
   final GraphViewState _view = GraphViewState();
 
-  double _baseScale = 1.0;
   Size _lastSize = Size.zero;
+
+  // Listener-based gesture state (avoids gesture arena — fixes Flutter web button taps)
+  final Map<int, Offset> _pointers = {};
+  Offset? _prevFocal;
+  double? _prevDist;
+  double _baseScale = 1.0;
+
+  // Manual long-press detection
+  Timer? _longPressTimer;
+  Offset? _longPressOrigin;
+  static const _kLongPressDuration = Duration(milliseconds: 500);
+  static const _kLongPressMoveSlop = 12.0;
 
   @override
   void initState() {
@@ -175,6 +187,7 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget> {
 
   @override
   void dispose() {
+    _longPressTimer?.cancel();
     _disposeNodeList(_worldNodes);
     _view.dispose();
     super.dispose();
@@ -445,34 +458,104 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget> {
     return best;
   }
 
-  void _onLongPress(LongPressStartDetails details) {
-    final hit = _hitTest(details.localPosition);
-    if (hit != null) widget.onNodeLongPress(hit.user);
+  // ---------------- Listener-based gestures ----------------
+  // Using Listener instead of GestureDetector so we never enter the gesture
+  // arena — this lets button taps in parent/sibling widgets work correctly
+  // on Flutter web (CanvasKit), where GestureDetector(onScale) would otherwise
+  // compete with and block all TapGestureRecognizers.
+
+  void _handlePointerDown(PointerDownEvent e) {
+    _pointers[e.pointer] = e.localPosition;
+
+    if (_pointers.length == 1) {
+      // Start long-press timer
+      _longPressOrigin = e.localPosition;
+      _longPressTimer?.cancel();
+      _longPressTimer = Timer(_kLongPressDuration, () {
+        final pos = _longPressOrigin;
+        if (pos == null) return;
+        final hit = _hitTest(pos);
+        if (hit != null) widget.onNodeLongPress(hit.user);
+        _longPressOrigin = null;
+      });
+    } else {
+      // Multi-touch: cancel long press, snapshot scale
+      _longPressTimer?.cancel();
+      _longPressOrigin = null;
+      _baseScale = _view.scale;
+    }
+
+    _prevFocal = _focal();
+    _prevDist = _dist();
   }
 
-  // ---------------- Gestures (no setState) ----------------
+  void _handlePointerMove(PointerMoveEvent e) {
+    _pointers[e.pointer] = e.localPosition;
 
-  void _onScaleStart(ScaleStartDetails details) {
-    _baseScale = _view.scale;
-  }
+    // Cancel long press on movement
+    if (_longPressOrigin != null &&
+        (e.localPosition - _longPressOrigin!).distance > _kLongPressMoveSlop) {
+      _longPressTimer?.cancel();
+      _longPressOrigin = null;
+    }
 
-  void _onScaleUpdate(ScaleUpdateDetails details) {
-    if (details.pointerCount == 1) {
+    final focal = _focal();
+    if (focal == null || _prevFocal == null) {
+      _prevFocal = focal;
+      _prevDist = _dist();
+      return;
+    }
+    final delta = focal - _prevFocal!;
+
+    if (_pointers.length == 1) {
       if (widget.is3D) {
         _view.update(
-          rotY: _view.rotY - details.focalPointDelta.dx * 0.008,
-          rotX: (_view.rotX + details.focalPointDelta.dy * 0.008)
-              .clamp(-pi / 2, pi / 2),
+          rotY: _view.rotY - delta.dx * 0.008,
+          rotX: (_view.rotX + delta.dy * 0.008).clamp(-pi / 2, pi / 2),
         );
       } else {
-        _view.update(pan: _view.pan + details.focalPointDelta);
+        _view.update(pan: _view.pan + delta);
       }
     } else {
-      _view.update(
-        scale: (_baseScale * details.scale).clamp(0.3, 3.0),
-        pan: _view.pan + details.focalPointDelta,
-      );
+      final d = _dist();
+      final prev = _prevDist;
+      double newScale = _view.scale;
+      if (d != null && prev != null && prev > 0) {
+        newScale = (_view.scale * d / prev).clamp(0.3, 3.0);
+      }
+      _view.update(scale: newScale, pan: _view.pan + delta);
     }
+
+    _prevFocal = focal;
+    _prevDist = _dist();
+  }
+
+  void _handlePointerUp(PointerUpEvent e) => _removePointer(e.pointer);
+  void _handlePointerCancel(PointerCancelEvent e) => _removePointer(e.pointer);
+
+  void _removePointer(int id) {
+    _pointers.remove(id);
+    if (_pointers.isEmpty) {
+      _longPressTimer?.cancel();
+      _longPressOrigin = null;
+      _prevFocal = null;
+      _prevDist = null;
+    } else {
+      _prevFocal = _focal();
+      _prevDist = _dist();
+    }
+  }
+
+  Offset? _focal() {
+    if (_pointers.isEmpty) return null;
+    return _pointers.values.reduce((a, b) => a + b) /
+        _pointers.length.toDouble();
+  }
+
+  double? _dist() {
+    if (_pointers.length < 2) return null;
+    final pts = _pointers.values.toList();
+    return (pts[0] - pts[1]).distance;
   }
 
   // ---------------- Build ----------------
@@ -488,10 +571,12 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget> {
         });
       }
       if (!validSize) return const SizedBox.shrink();
-      return GestureDetector(
-        onLongPressStart: _onLongPress,
-        onScaleStart: _onScaleStart,
-        onScaleUpdate: _onScaleUpdate,
+      return Listener(
+        behavior: HitTestBehavior.deferToChild,
+        onPointerDown: _handlePointerDown,
+        onPointerMove: _handlePointerMove,
+        onPointerUp: _handlePointerUp,
+        onPointerCancel: _handlePointerCancel,
         child: RepaintBoundary(
           child: CustomPaint(
             size: size,
