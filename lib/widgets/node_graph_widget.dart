@@ -910,9 +910,67 @@ class _FRLayout {
       prevRadius = radius;
     }
 
+    // ---- Post-process: push nodes away from edges they don't belong to ----
+    _separateNodesFromEdges(
+      n: n, px: px, py: py, edges: edges,
+      anchored: {centerIdx},
+      nodeRadius: 11.0, clearance: 8.0, passes: 60,
+    );
+
     return (px, py, ringOf);
   }
 
+  /// Iteratively pushes each node away from edges it is not an endpoint of.
+  /// Nodes in [anchored] are never moved. [nodeRadius] and [clearance] define
+  /// the minimum distance between a node's surface and a passing edge.
+  static void _separateNodesFromEdges({
+    required int n,
+    required List<double> px,
+    required List<double> py,
+    required List<(int, int, double)> edges,
+    required Set<int> anchored,
+    double nodeRadius = 14.0,
+    double clearance = 10.0,
+    int passes = 80,
+  }) {
+    final minDist = nodeRadius + clearance;
+    for (int pass = 0; pass < passes; pass++) {
+      bool any = false;
+      for (final (ei, ej, _) in edges) {
+        final ax = px[ei], ay = py[ei];
+        final bx = px[ej], by = py[ej];
+        final edgeLen2 = (bx - ax) * (bx - ax) + (by - ay) * (by - ay);
+        if (edgeLen2 < 4.0) continue;
+        final invLen2 = 1.0 / edgeLen2;
+        for (int k = 0; k < n; k++) {
+          if (k == ei || k == ej || anchored.contains(k)) continue;
+          // Parameter t = projection of node k onto the edge segment.
+          final t = ((px[k] - ax) * (bx - ax) + (py[k] - ay) * (by - ay)) * invLen2;
+          // Skip near-endpoint region so we don't fight with adjacent nodes.
+          if (t < 0.08 || t > 0.92) continue;
+          final nearX = ax + t * (bx - ax);
+          final nearY = ay + t * (by - ay);
+          final dx = px[k] - nearX;
+          final dy = py[k] - nearY;
+          final d2 = dx * dx + dy * dy;
+          if (d2 >= minDist * minDist) continue;
+          any = true;
+          final d = sqrt(d2);
+          final push = (minDist - d) * 0.55;
+          if (d < 0.5) {
+            // Node almost on edge: push perpendicular to edge direction.
+            final invLen = 1.0 / sqrt(edgeLen2);
+            px[k] += -(by - ay) * invLen * push;
+            py[k] += (bx - ax) * invLen * push;
+          } else {
+            px[k] += dx / d * push;
+            py[k] += dy / d * push;
+          }
+        }
+      }
+      if (!any) break;
+    }
+  }
 
   // edges: (fromIdx, toIdx, springMultiplier)
   // springMultiplier > 1 = stronger pull (bestFriend) → nodes end up closer;
@@ -1047,6 +1105,14 @@ class _FRLayout {
     }
 
     // Re-anchor self (separation passes may have drifted it slightly).
+    px[selfIdx] = 0;
+    py[selfIdx] = 0;
+
+    // ---- Post-process: push nodes away from edges they don't belong to ----
+    _separateNodesFromEdges(
+      n: n, px: px, py: py, edges: edges,
+      anchored: {selfIdx},
+    );
     px[selfIdx] = 0;
     py[selfIdx] = 0;
 
