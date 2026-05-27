@@ -729,8 +729,16 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
         newScale = (_view.scale * d / prev).clamp(0.3, 3.0);
       }
       if (widget.is3D) {
-        // 3D: scale only, no pan — keeps self at screen center so rotation stays centred.
-        _view.update(scale: newScale);
+        // 3D: zoom toward screen centre (pivot = cx,cy) + allow two-finger pan.
+        // newPan = pan * ratio keeps screen-centre fixed; + delta adds finger translation.
+        final ratio = newScale / _view.scale;
+        _view.update(
+          scale: newScale,
+          pan: Offset(
+            _view.pan.dx * ratio + delta.dx,
+            _view.pan.dy * ratio + delta.dy,
+          ),
+        );
       } else {
         // 2D: focal-centred zoom — the world point under the previous focal
         // stays fixed at the new focal position after scale + finger translation.
