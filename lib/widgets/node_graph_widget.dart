@@ -323,6 +323,10 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
         setState(() => _centerId = 'self');
       }
     }
+    // Switching from 2D to 3D: reset pan so rotation pivots on screen centre.
+    if (!old.is3D && widget.is3D) {
+      _view.update(pan: Offset.zero);
+    }
   }
 
   void _rebuildEdgesOnly() {
@@ -724,7 +728,22 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
       if (d != null && prev != null && prev > 0) {
         newScale = (_view.scale * d / prev).clamp(0.3, 3.0);
       }
-      _view.update(scale: newScale, pan: _view.pan + delta);
+      if (widget.is3D) {
+        // 3D: scale only, no pan — keeps self at screen center so rotation stays centred.
+        _view.update(scale: newScale);
+      } else {
+        // 2D: focal-centred zoom — the world point under the previous focal
+        // stays fixed at the new focal position after scale + finger translation.
+        final prevFocal = _prevFocal!;
+        final cx = _lastSize.width / 2;
+        final cy = _lastSize.height / 2;
+        final ratio = newScale / _view.scale;
+        final newPan = Offset(
+          focal.dx - cx - (prevFocal.dx - cx - _view.pan.dx) * ratio,
+          focal.dy - cy - (prevFocal.dy - cy - _view.pan.dy) * ratio,
+        );
+        _view.update(scale: newScale, pan: newPan);
+      }
     }
 
     _prevFocal = focal;
@@ -1086,7 +1105,7 @@ class _FRLayout {
     final otherCIds = sortedCIds.where((c) => c != selfCommunity).toList();
     final centX = <int, double>{selfCommunity: 0.0};
     final centY = <int, double>{selfCommunity: 0.0};
-    final centroidR = shortSide * 0.32;
+    final centroidR = shortSide * 0.48;
     for (int ci = 0; ci < otherCIds.length; ci++) {
       final angle = 2 * pi * ci / max(otherCIds.length, 1) - pi / 2;
       centX[otherCIds[ci]] = centroidR * cos(angle);
@@ -1157,15 +1176,15 @@ class _FRLayout {
       for (int i = 0; i < n; i++) {
         if (i == selfIdx) continue;
         final c = communities[i];
-        fx[i] -= (px[i] - centX[c]!) * 0.018;
-        fy[i] -= (py[i] - centY[c]!) * 0.018;
+        fx[i] -= (px[i] - centX[c]!) * 0.014;
+        fy[i] -= (py[i] - centY[c]!) * 0.014;
       }
 
-      // Gravity toward origin.
+      // Gravity toward origin (reduced to allow communities to spread out).
       for (int i = 0; i < n; i++) {
         if (i == selfIdx) continue;
-        fx[i] -= px[i] * 0.003;
-        fy[i] -= py[i] * 0.003;
+        fx[i] -= px[i] * 0.001;
+        fy[i] -= py[i] * 0.001;
       }
 
       // Apply clamped displacement.
