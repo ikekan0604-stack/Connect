@@ -433,8 +433,8 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
       pz = List<double>.filled(n, 0);
       ringDepths = r.$3;
     } else {
-      // Force-directed 2D layout — sort tab.
-      final r = _FRLayout.compute2D(
+      // Community-aware force-directed 2D layout — sort tab.
+      final r = _FRLayout.compute2DGrouped(
         n: n,
         selfIdx: 0,
         edges: fEdges,
@@ -847,8 +847,9 @@ class _FRLayout {
       adj[j].add(i);
     }
 
-    // BFS from center → assign ring number.
+    // BFS from center → assign ring number + track BFS parent for angular clustering.
     final ringOf = List<int>.filled(n, -1);
+    final parent = List<int>.filled(n, -1);
     ringOf[centerIdx] = 0;
     final queue = <int>[centerIdx];
     // rings[k] = list of node indices at BFS depth k.
@@ -860,6 +861,7 @@ class _FRLayout {
       for (final nb in adj[cur]) {
         if (ringOf[nb] == -1) {
           ringOf[nb] = d + 1;
+          parent[nb] = cur;
           queue.add(nb);
           rings.putIfAbsent(d + 1, () => <int>[]).add(nb);
         }
@@ -879,12 +881,10 @@ class _FRLayout {
       }
     }
 
-    // ---- Place each ring concentrically ----
-    // Minimum radius gap between adjacent rings.
+    // ---- Place each ring concentrically with angular clustering ----
     const double ringGap = 108.0;
-    // Minimum arc-length per node (covers the node diameter + small padding).
-    const double nodeArcDirect = 58.0; // for ring 1 (larger nodes)
-    const double nodeArcOther  = 44.0; // for rings 2+
+    const double nodeArcDirect = 58.0;
+    const double nodeArcOther  = 44.0;
 
     double prevRadius = 0;
     final sortedKeys = rings.keys.toList()..sort();
@@ -893,18 +893,32 @@ class _FRLayout {
       if (ring == 0) continue; // center stays at (0, 0)
       final nodes = rings[ring]!;
 
-      // Sort by index for deterministic, stable ordering.
-      nodes.sort();
+      // Group by BFS parent so sibling sub-trees are placed adjacent on the arc.
+      final byParent = <int, List<int>>{};
+      for (final idx in nodes) {
+        byParent.putIfAbsent(parent[idx], () => []).add(idx);
+      }
+      // Sort parent groups by the parent node's angular position in the previous ring.
+      final parentKeys = byParent.keys.toList()
+        ..sort((a, b) {
+          if (a == -1) return 1;
+          if (b == -1) return -1;
+          return atan2(py[a], px[a]).compareTo(atan2(py[b], px[b]));
+        });
+      // Within each parent group, order mutually connected nodes adjacently.
+      final orderedNodes = <int>[];
+      for (final p in parentKeys) {
+        orderedNodes.addAll(_orderGroupByConnection(byParent[p]!, edges));
+      }
 
       final arc = ring == 1 ? nodeArcDirect : nodeArcOther;
-      final minByArc = nodes.length * arc / (2 * pi);
+      final minByArc = orderedNodes.length * arc / (2 * pi);
       final radius = max(prevRadius + ringGap, minByArc);
 
-      // Distribute nodes evenly starting from top (−π/2).
-      for (int i = 0; i < nodes.length; i++) {
-        final angle = 2 * pi * i / nodes.length - pi / 2;
-        px[nodes[i]] = radius * cos(angle);
-        py[nodes[i]] = radius * sin(angle);
+      for (int i = 0; i < orderedNodes.length; i++) {
+        final angle = 2 * pi * i / orderedNodes.length - pi / 2;
+        px[orderedNodes[i]] = radius * cos(angle);
+        py[orderedNodes[i]] = radius * sin(angle);
       }
 
       prevRadius = radius;
@@ -970,6 +984,247 @@ class _FRLayout {
       }
       if (!any) break;
     }
+  }
+
+  /// Greedy nearest-neighbor ordering within a BFS ring group.
+  /// Nodes with stronger mutual connections end up placed adjacent to each other.
+  static List<int> _orderGroupByConnection(
+      List<int> group, List<(int, int, double)> edges) {
+    if (group.length <= 2) return List.from(group);
+    final groupSet = group.toSet();
+    final weights = <(int, int), double>{};
+    for (final (a, b, w) in edges) {
+      if (groupSet.contains(a) && groupSet.contains(b)) {
+        weights[(a, b)] = w;
+        weights[(b, a)] = w;
+      }
+    }
+    final result = <int>[group.first];
+    final rem = group.sublist(1).toSet();
+    while (rem.isNotEmpty) {
+      final last = result.last;
+      int? best;
+      double bestW = -1;
+      for (final r in rem) {
+        final w = weights[(last, r)] ?? 0.0;
+        if (w > bestW) {
+          bestW = w;
+          best = r;
+        }
+      }
+      result.add(best ?? rem.first);
+      rem.remove(result.last);
+    }
+    return result;
+  }
+
+  /// Label propagation community detection. Returns 0-based community index per node.
+  static List<int> _detectCommunities({
+    required int n,
+    required List<(int, int, double)> edges,
+    int iterations = 20,
+  }) {
+    final rng = Random(42);
+    final labels = List<int>.generate(n, (i) => i);
+    for (int iter = 0; iter < iterations; iter++) {
+      final order = List<int>.generate(n, (i) => i)..shuffle(rng);
+      bool changed = false;
+      for (final i in order) {
+        final votes = <int, double>{};
+        for (final (a, b, w) in edges) {
+          if (a == i) {
+            votes.update(labels[b], (v) => v + w, ifAbsent: () => w);
+          } else if (b == i) {
+            votes.update(labels[a], (v) => v + w, ifAbsent: () => w);
+          }
+        }
+        if (votes.isEmpty) continue;
+        final best =
+            votes.entries.reduce((x, y) => x.value >= y.value ? x : y).key;
+        if (best != labels[i]) {
+          labels[i] = best;
+          changed = true;
+        }
+      }
+      if (!changed) break;
+    }
+    final unique = labels.toSet().toList()..sort();
+    final map = {for (int i = 0; i < unique.length; i++) unique[i]: i};
+    return labels.map((l) => map[l]!).toList();
+  }
+
+  /// Community-aware force-directed 2D layout (sort tab).
+  /// Detects friend groups via label propagation, places community centroids
+  /// in a circle around self, then runs FR with a cohesion term so groups
+  /// stay clustered while still being pulled by actual relationship springs.
+  static (List<double>, List<double>) compute2DGrouped({
+    required int n,
+    required int selfIdx,
+    required List<(int, int, double)> edges,
+    required double shortSide,
+    int iterations = 130,
+  }) {
+    if (n == 0) return (<double>[], <double>[]);
+    final rng = Random(42);
+    final px = List<double>.filled(n, 0);
+    final py = List<double>.filled(n, 0);
+
+    // Detect communities.
+    final communities = _detectCommunities(n: n, edges: edges);
+
+    // Group by community, sort descending by size for stable centroid placement.
+    final communityGroups = <int, List<int>>{};
+    for (int i = 0; i < n; i++) {
+      communityGroups.putIfAbsent(communities[i], () => []).add(i);
+    }
+    final sortedCIds = communityGroups.keys.toList()
+      ..sort((a, b) =>
+          communityGroups[b]!.length.compareTo(communityGroups[a]!.length));
+
+    // Self's community centroid → origin; others placed in a circle.
+    final selfCommunity = communities[selfIdx];
+    final otherCIds = sortedCIds.where((c) => c != selfCommunity).toList();
+    final centX = <int, double>{selfCommunity: 0.0};
+    final centY = <int, double>{selfCommunity: 0.0};
+    final centroidR = shortSide * 0.32;
+    for (int ci = 0; ci < otherCIds.length; ci++) {
+      final angle = 2 * pi * ci / max(otherCIds.length, 1) - pi / 2;
+      centX[otherCIds[ci]] = centroidR * cos(angle);
+      centY[otherCIds[ci]] = centroidR * sin(angle);
+    }
+
+    // Initialize positions scattered near each community centroid.
+    for (int i = 0; i < n; i++) {
+      if (i == selfIdx) continue;
+      final c = communities[i];
+      final angle = 2 * pi * rng.nextDouble();
+      final r = shortSide * 0.06 * (0.5 + rng.nextDouble());
+      px[i] = centX[c]! + r * cos(angle);
+      py[i] = centY[c]! + r * sin(angle);
+    }
+
+    final area = shortSide * shortSide;
+    final k = sqrt(area / max(n, 4)) * 1.4;
+    const double minGap = 50.0;
+    double temp = shortSide * 0.09;
+
+    final fx = List<double>.filled(n, 0);
+    final fy = List<double>.filled(n, 0);
+
+    for (int iter = 0; iter < iterations; iter++) {
+      for (int i = 0; i < n; i++) {
+        fx[i] = 0;
+        fy[i] = 0;
+      }
+
+      // Repulsion.
+      for (int i = 0; i < n; i++) {
+        for (int j = i + 1; j < n; j++) {
+          double dx = px[i] - px[j];
+          double dy = py[i] - py[j];
+          double dist = sqrt(dx * dx + dy * dy);
+          if (dist < 0.5) {
+            dx = (rng.nextDouble() - 0.5) * 6;
+            dy = (rng.nextDouble() - 0.5) * 6;
+            dist = sqrt(dx * dx + dy * dy);
+            if (dist < 0.01) dist = 0.01;
+          }
+          final invDist = 1 / dist;
+          var force = (k * k) * invDist;
+          if (dist < minGap) force += (minGap - dist) * 14;
+          fx[i] += dx * invDist * force;
+          fy[i] += dy * invDist * force;
+          fx[j] -= dx * invDist * force;
+          fy[j] -= dy * invDist * force;
+        }
+      }
+
+      // Attraction: relationship-weighted springs.
+      for (final (i, j, mult) in edges) {
+        final dx = px[i] - px[j];
+        final dy = py[i] - py[j];
+        double dist = sqrt(dx * dx + dy * dy);
+        if (dist < 1) dist = 1;
+        final invDist = 1 / dist;
+        final force = (dist * dist) / k * mult;
+        fx[i] -= dx * invDist * force;
+        fy[i] -= dy * invDist * force;
+        fx[j] += dx * invDist * force;
+        fy[j] += dy * invDist * force;
+      }
+
+      // Community cohesion: soft pull toward community centroid.
+      for (int i = 0; i < n; i++) {
+        if (i == selfIdx) continue;
+        final c = communities[i];
+        fx[i] -= (px[i] - centX[c]!) * 0.018;
+        fy[i] -= (py[i] - centY[c]!) * 0.018;
+      }
+
+      // Gravity toward origin.
+      for (int i = 0; i < n; i++) {
+        if (i == selfIdx) continue;
+        fx[i] -= px[i] * 0.003;
+        fy[i] -= py[i] * 0.003;
+      }
+
+      // Apply clamped displacement.
+      for (int i = 0; i < n; i++) {
+        if (i == selfIdx) {
+          px[i] = 0;
+          py[i] = 0;
+          continue;
+        }
+        final mag = sqrt(fx[i] * fx[i] + fy[i] * fy[i]);
+        if (mag < 0.001) continue;
+        final clamped = min(mag, temp);
+        px[i] += fx[i] / mag * clamped;
+        py[i] += fy[i] / mag * clamped;
+      }
+
+      temp = max(temp * 0.96, 0.4);
+    }
+
+    // Post-process: guarantee no overlap.
+    for (int pass = 0; pass < 120; pass++) {
+      bool anyOverlap = false;
+      for (int i = 0; i < n; i++) {
+        for (int j = i + 1; j < n; j++) {
+          final dx = px[i] - px[j];
+          final dy = py[i] - py[j];
+          final d = sqrt(dx * dx + dy * dy);
+          if (d < minGap && d > 0.01) {
+            final push = (minGap - d) * 0.55;
+            final nx = dx / d;
+            final ny = dy / d;
+            if (i == selfIdx) {
+              px[j] -= nx * push * 2;
+              py[j] -= ny * push * 2;
+            } else if (j == selfIdx) {
+              px[i] += nx * push * 2;
+              py[i] += ny * push * 2;
+            } else {
+              px[i] += nx * push;
+              py[i] += ny * push;
+              px[j] -= nx * push;
+              py[j] -= ny * push;
+            }
+            anyOverlap = true;
+          }
+        }
+      }
+      if (!anyOverlap) break;
+    }
+
+    px[selfIdx] = 0;
+    py[selfIdx] = 0;
+
+    _separateNodesFromEdges(
+        n: n, px: px, py: py, edges: edges, anchored: {selfIdx});
+    px[selfIdx] = 0;
+    py[selfIdx] = 0;
+
+    return (px, py);
   }
 
   // edges: (fromIdx, toIdx, springMultiplier)
