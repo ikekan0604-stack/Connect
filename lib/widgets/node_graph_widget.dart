@@ -630,6 +630,8 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
     _WorldNode? best;
     double bestDist = double.infinity;
 
+    final comp = (1.0 / _view.scale).clamp(0.45, 1.7);
+
     if (widget.is3D) {
       final cosX = cos(_view.rotX), sinX = sin(_view.rotX);
       final cosY = cos(_view.rotY), sinY = sin(_view.rotY);
@@ -641,7 +643,7 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
         final dz = max(z2 + _fov, 20.0);
         final s = _fov / dz;
         final nodePos = Offset(cx + x1 * s, cy + y2 * s);
-        final nodeR = n.baseRadius * s.clamp(0.45, 1.5);
+        final nodeR = n.baseRadius * s.clamp(0.45, 1.5) * comp;
         final d = (painterPos - nodePos).distance;
         final hitR = nodeR + 14 / _view.scale;
         if (d <= hitR && d < bestDist) {
@@ -653,7 +655,7 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
       for (final n in _worldNodes) {
         final nodePos = Offset(cx + n.wx, cy + n.wy);
         final d = (painterPos - nodePos).distance;
-        final hitR = n.baseRadius + 14 / _view.scale;
+        final hitR = n.baseRadius * comp + 14 / _view.scale;
         if (d <= hitR && d < bestDist) {
           best = n;
           bestDist = d;
@@ -1586,6 +1588,12 @@ class _GraphPainter extends CustomPainter {
     final radList = List<double>.filled(n, 0);
     final depths = List<double>.filled(n, 0);
 
+    // Scale compensation: shrink nodes when zoomed in, grow when zoomed out.
+    // Full inverse-scale in the readable range; clamped at both ends.
+    // min 0.45 → nodes don't vanish at high zoom-in (still slightly visible).
+    // max 1.7  → nodes don't flood the screen at high zoom-out.
+    final comp = (1.0 / view.scale).clamp(0.45, 1.7);
+
     if (is3D) {
       final cosX = cos(view.rotX), sinX = sin(view.rotX);
       final cosY = cos(view.rotY), sinY = sin(view.rotY);
@@ -1598,7 +1606,7 @@ class _GraphPainter extends CustomPainter {
         final dz = max(z2 + _fov, 20.0);
         final s = _fov / dz;
         posList[i] = Offset(cx + x1 * s, cy + y2 * s);
-        radList[i] = node.baseRadius * s.clamp(0.45, 1.5);
+        radList[i] = node.baseRadius * s.clamp(0.45, 1.5) * comp;
         depths[i] = z2;
       }
     } else {
@@ -1616,7 +1624,7 @@ class _GraphPainter extends CustomPainter {
           }
         }
         posList[i] = Offset(cx + wx, cy + wy);
-        radList[i] = node.baseRadius;
+        radList[i] = node.baseRadius * comp;
         depths[i] = 0;
       }
     }
