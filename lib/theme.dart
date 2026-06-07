@@ -1,52 +1,73 @@
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 
 class AppTheme {
-  static const Color background = Color(0xFF080808);
-  static const Color surface = Color(0xFF111111);
-  static const Color surfaceElevated = Color(0xFF1A1A1A);
-  static const Color accent = Color(0xFFE5E5E5);
-  static const Color textPrimary = Color(0xFFF2F2F2);
-  static const Color textSecondary = Color(0xFF8E8E8E);
-  static const Color textTertiary = Color(0xFF5C5C5C);
-  static const Color divider = Color(0xFF1F1F1F);
+  // Sketchbook palette: near-white paper + deep-indigo pen ink + pink accent.
+  static const Color background = Color(0xFFFBF9F4); // whiter paper
+  static const Color surface = Color(0xFFFFFDFA); // card on paper
+  static const Color surfaceElevated = Color(0xFFFFFFFF);
+  static const Color accent = Color(0xFFE85C8A); // pen pink
+  static const Color ink = Color(0xFF2A2740); // primary pen ink (near-black indigo)
+  static const Color textPrimary = Color(0xFF34304A);
+  static const Color textSecondary = Color(0xFF6E6884);
+  static const Color textTertiary = Color(0xFFA9A2B8);
+  static const Color divider = Color(0xFFE2DAC8);
 
-  static ThemeData get theme => ThemeData(
-        brightness: Brightness.dark,
+  // ---- Typefaces (cute, but grown-up) ----
+  // Body: Zen Maru Gothic — a soft rounded gothic that reads cute yet refined.
+  // Display: Klee One — a pen-handwriting face that ties into the sketchbook look.
+  static TextStyle body([TextStyle? s]) => GoogleFonts.zenMaruGothic(textStyle: s);
+  static TextStyle display([TextStyle? s]) => GoogleFonts.kleeOne(textStyle: s);
+  static String get bodyFamily => GoogleFonts.zenMaruGothic().fontFamily!;
+
+  static ThemeData get theme {
+    final base = ThemeData(brightness: Brightness.light);
+    return ThemeData(
+        brightness: Brightness.light,
+        fontFamily: bodyFamily,
+        textTheme: GoogleFonts.zenMaruGothicTextTheme(base.textTheme)
+            .apply(bodyColor: textPrimary, displayColor: textPrimary),
         scaffoldBackgroundColor: background,
-        colorScheme: const ColorScheme.dark(
+        colorScheme: const ColorScheme.light(
           primary: accent,
           surface: surface,
+          onSurface: textPrimary,
         ),
         bottomNavigationBarTheme: const BottomNavigationBarThemeData(
-          backgroundColor: Color(0xFF0A0A0A),
-          selectedItemColor: textPrimary,
+          backgroundColor: surface,
+          selectedItemColor: accent,
           unselectedItemColor: textTertiary,
           type: BottomNavigationBarType.fixed,
           elevation: 0,
         ),
-        appBarTheme: const AppBarTheme(
+        appBarTheme: AppBarTheme(
           backgroundColor: Colors.transparent,
           elevation: 0,
           centerTitle: false,
-          titleTextStyle: TextStyle(
+          titleTextStyle: GoogleFonts.zenMaruGothic(
             color: textPrimary,
             fontSize: 16,
-            fontWeight: FontWeight.w500,
+            fontWeight: FontWeight.w600,
             letterSpacing: 1.5,
           ),
         ),
+        tabBarTheme: const TabBarThemeData(
+          indicatorColor: accent,
+          labelColor: accent,
+          unselectedLabelColor: textTertiary,
+        ),
         sliderTheme: SliderThemeData(
-          activeTrackColor: textPrimary,
-          thumbColor: textPrimary,
-          inactiveTrackColor: const Color(0xFF2A2A2A),
-          overlayColor: textPrimary.withValues(alpha: 0.08),
+          activeTrackColor: accent,
+          thumbColor: accent,
+          inactiveTrackColor: const Color(0xFFDED6C4),
+          overlayColor: accent.withValues(alpha: 0.12),
           trackHeight: 1.5,
         ),
         chipTheme: ChipThemeData(
           backgroundColor: surface,
-          selectedColor: textPrimary,
+          selectedColor: accent,
           labelStyle: const TextStyle(color: textPrimary, fontSize: 11),
-          side: BorderSide(color: textTertiary.withValues(alpha: 0.3)),
+          side: BorderSide(color: textTertiary.withValues(alpha: 0.4)),
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
         ),
         inputDecorationTheme: InputDecorationTheme(
@@ -62,10 +83,11 @@ class AppTheme {
           ),
           focusedBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(10),
-            borderSide: const BorderSide(color: textPrimary, width: 1),
+            borderSide: const BorderSide(color: accent, width: 1),
           ),
           labelStyle: const TextStyle(color: textSecondary, fontSize: 12),
           hintStyle: TextStyle(color: textTertiary.withValues(alpha: 0.7)),
         ),
       );
+  }
 }

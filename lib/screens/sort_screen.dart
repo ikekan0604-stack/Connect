@@ -96,9 +96,9 @@ class _SortScreenState extends State<SortScreen> {
                   const Text(
                     'sort',
                     style: TextStyle(
-                      color: Color(0xFFB8B8B8),
+                      color: AppTheme.ink,
                       fontSize: 13,
-                      fontWeight: FontWeight.w500,
+                      fontWeight: FontWeight.w600,
                       letterSpacing: 2.5,
                     ),
                   ),
@@ -108,13 +108,13 @@ class _SortScreenState extends State<SortScreen> {
                       padding: const EdgeInsets.symmetric(
                           horizontal: 8, vertical: 3),
                       decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.08),
+                        color: AppTheme.ink.withValues(alpha: 0.08),
                         borderRadius: BorderRadius.circular(6),
                       ),
                       child: Text(
                         '${_highlightedIds!.length - 1} hit',
                         style: TextStyle(
-                          color: Colors.white.withValues(alpha: 0.8),
+                          color: AppTheme.ink.withValues(alpha: 0.8),
                           fontSize: 10,
                           letterSpacing: 0.5,
                         ),
@@ -181,20 +181,21 @@ class _MonoMiniBtn extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 8),
         decoration: BoxDecoration(
           color: active
-              ? Colors.white.withValues(alpha: 0.14)
-              : Colors.white.withValues(alpha: 0.06),
-          borderRadius: BorderRadius.circular(6),
+              ? AppTheme.accent.withValues(alpha: 0.16)
+              : AppTheme.surface.withValues(alpha: 0.85),
+          borderRadius: BorderRadius.circular(8),
           border: Border.all(
-            color: Colors.white.withValues(alpha: active ? 0.3 : 0.15),
+            color: active ? AppTheme.accent : AppTheme.ink.withValues(alpha: 0.3),
+            width: 1.4,
           ),
         ),
         alignment: Alignment.center,
         child: Text(
           label,
           style: TextStyle(
-            color: active ? Colors.white : const Color(0xFFCFCFCF),
+            color: active ? AppTheme.accent : AppTheme.ink,
             fontSize: 11,
-            fontWeight: FontWeight.w500,
+            fontWeight: FontWeight.w600,
             letterSpacing: 0.5,
           ),
         ),
@@ -231,9 +232,12 @@ class _FilterPanel extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: const Color(0xFF111111).withValues(alpha: 0.92),
+        color: AppTheme.surfaceElevated.withValues(alpha: 0.97),
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.07)),
+        border: Border.all(
+          color: AppTheme.ink.withValues(alpha: 0.22),
+          width: 1.4,
+        ),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -283,7 +287,7 @@ class _FilterPanel extends StatelessWidget {
               Text(
                 '線を表示',
                 style: TextStyle(
-                  color: Colors.white.withValues(alpha: 0.55),
+                  color: AppTheme.ink.withValues(alpha: 0.55),
                   fontSize: 11,
                 ),
               ),
@@ -294,9 +298,9 @@ class _FilterPanel extends StatelessWidget {
                   value: showAllEdges,
                   onChanged: onShowAllEdgesChanged,
                   activeColor: Colors.white,
-                  activeTrackColor: Colors.white.withValues(alpha: 0.25),
-                  inactiveThumbColor: const Color(0xFF666666),
-                  inactiveTrackColor: Colors.white.withValues(alpha: 0.08),
+                  activeTrackColor: AppTheme.accent,
+                  inactiveThumbColor: AppTheme.surfaceElevated,
+                  inactiveTrackColor: AppTheme.ink.withValues(alpha: 0.18),
                 ),
               ),
               const Spacer(),
@@ -305,7 +309,7 @@ class _FilterPanel extends StatelessWidget {
                 child: Text(
                   'reset',
                   style: TextStyle(
-                    color: Colors.white.withValues(alpha: 0.6),
+                    color: AppTheme.ink.withValues(alpha: 0.6),
                     fontSize: 11,
                     fontWeight: FontWeight.w500,
                     letterSpacing: 0.5,
@@ -335,7 +339,7 @@ class _FilterRow extends StatelessWidget {
           child: Text(
             label,
             style: TextStyle(
-              color: Colors.white.withValues(alpha: 0.45),
+              color: AppTheme.ink.withValues(alpha: 0.45),
               fontSize: 11,
               letterSpacing: 0.3,
             ),
@@ -364,19 +368,19 @@ class _DropdownFilter extends StatelessWidget {
       height: 28,
       padding: const EdgeInsets.symmetric(horizontal: 8),
       decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.04),
-        borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.10)),
+        color: AppTheme.surface,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: AppTheme.ink.withValues(alpha: 0.25)),
       ),
       child: DropdownButtonHideUnderline(
         child: DropdownButton<String>(
           value: value,
           isExpanded: true,
-          dropdownColor: const Color(0xFF161616),
-          style: const TextStyle(color: Color(0xFFE0E0E0), fontSize: 12),
+          dropdownColor: AppTheme.surfaceElevated,
+          style: const TextStyle(color: AppTheme.ink, fontSize: 12),
           icon: Icon(
             Icons.keyboard_arrow_down,
-            color: Colors.white.withValues(alpha: 0.4),
+            color: AppTheme.ink.withValues(alpha: 0.5),
             size: 14,
           ),
           items: items
@@ -408,20 +412,21 @@ class _LevelChip extends StatelessWidget {
         margin: const EdgeInsets.only(right: 4),
         padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
         decoration: BoxDecoration(
-          color: selected ? Colors.white.withValues(alpha: 0.85) : Colors.transparent,
+          color: selected ? AppTheme.accent : Colors.transparent,
           borderRadius: BorderRadius.circular(12),
           border: Border.all(
             color: selected
-                ? Colors.white
-                : Colors.white.withValues(alpha: 0.2),
+                ? AppTheme.accent
+                : AppTheme.ink.withValues(alpha: 0.3),
+            width: 1.2,
           ),
         ),
         child: Text(
           label,
           style: TextStyle(
-            color: selected ? Colors.black : Colors.white.withValues(alpha: 0.6),
+            color: selected ? Colors.white : AppTheme.ink.withValues(alpha: 0.7),
             fontSize: 10,
-            fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+            fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
           ),
         ),
       ),

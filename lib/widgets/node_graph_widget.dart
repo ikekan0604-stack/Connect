@@ -7,14 +7,23 @@ import 'dart:html' as html;
 import 'package:flutter/material.dart';
 import '../models/user.dart';
 import '../models/connection.dart';
+import '../theme.dart';
 
 // ---------------- Data structs ----------------
 
-class _Star {
-  final Offset pos;
-  final double size;
+/// Pen-drawn background motif scattered across the sketchbook page.
+enum _DoodleKind { star, heart, rocket, sparkle, swirl, dot }
+
+class _Doodle {
+  final _DoodleKind kind;
+  final Offset pos; // normalized 0..1 across the canvas
+  final double size; // px
+  final double rotation; // radians
   final double opacity;
-  const _Star(this.pos, this.size, this.opacity);
+  /// Pre-built pen path in local space (roughly unit-sized, centred at origin).
+  final ui.Path path;
+  const _Doodle(
+      this.kind, this.pos, this.size, this.rotation, this.opacity, this.path);
 }
 
 class _WorldNode {
@@ -26,6 +35,9 @@ class _WorldNode {
   // Pre-built at layout time — never recreated during rotation
   final TextPainter emojiPainter;
   final TextPainter? namePainter; // null when baseRadius < 11
+  /// Tiny per-node seed used to give the (true-circle) pen rings a stable,
+  /// barely-there offset so they read as hand-drawn rather than vector-perfect.
+  final int penSeed;
 
   _WorldNode({
     required this.user,
@@ -36,6 +48,7 @@ class _WorldNode {
     this.ringDepth = -1,
     required this.emojiPainter,
     this.namePainter,
+    required this.penSeed,
   });
 
   void dispose() {
@@ -51,8 +64,10 @@ class _WorldEdge {
   final double opacity;
   /// True when both endpoints are in ring 0 or ring 1 (concentric mode).
   final bool isPrimary;
+  /// Weaker ties render as a hand-drawn dotted/dashed pen line.
+  final bool dashed;
   const _WorldEdge(this.fromIdx, this.toIdx, this.thickness, this.opacity,
-      {this.isPrimary = false});
+      {this.isPrimary = false, this.dashed = false});
 }
 
 // ---------------- View transform state (Listenable) ----------------
@@ -88,7 +103,27 @@ class GraphViewState extends ChangeNotifier {
   }
 }
 
-// ---------------- Color helpers ----------------
+// ---------------- Sketchbook palette ----------------
+// A warm cream page with dark indigo ink — chic pen-illustration look, gentler
+// on the eyes than pure black-on-white. Kept local to avoid a theme import cycle.
+
+/// Near-white sketchbook paper.
+const Color _kPaper = Color(0xFFFBF9F4);
+/// Slightly warmer paper for the page's lower edge (faint gradient).
+const Color _kPaperLow = Color(0xFFF3EFE6);
+/// Soft ink for faint marks (dot grid, doodles).
+const Color _kInk = Color(0xFF2A2740);
+/// Near-black indigo used for every node ring — the unified pen-line colour.
+const Color _kInkLine = Color(0xFF201D33);
+/// Hot-but-tasteful pink accent that reads well on paper.
+const Color _kAccent = Color(0xFFE85C8A);
+
+/// Deterministic pseudo-random noise in [-1, 1] from an integer seed.
+/// Classic GLSL-style hash — web-safe (no 64-bit int ops).
+double _seedNoise(int s) {
+  final x = sin(s * 12.9898) * 43758.5453;
+  return (x - x.floorToDouble()) * 2 - 1;
+}
 
 Color _desaturate(Color c, [double amount = 1.0]) {
   final r = (c.r * 255.0).round();
@@ -173,7 +208,7 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
     with SingleTickerProviderStateMixin {
   static const double _fov = 460.0;
 
-  late List<_Star> _stars;
+  late List<_Doodle> _doodles;
   List<_WorldNode> _worldNodes = const [];
   List<_WorldEdge> _worldEdges = const [];
 
@@ -217,7 +252,7 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
   @override
   void initState() {
     super.initState();
-    _stars = _generateStars(60);
+    _doodles = _generateDoodles(46);
     PaintingBinding.instance.systemFonts.addListener(_onFontsLoaded);
 
     _animCtrl = AnimationController(
@@ -354,6 +389,9 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
           _edgeThickness(c.level),
           _edgeOpacity(c.level),
           isPrimary: isPrimary,
+          // Solid only for strong ties; weaker relationships stay dotted.
+          dashed: c.level != RelationshipLevel.closeFriend &&
+              c.level != RelationshipLevel.bestFriend,
         ));
       }
     }
@@ -363,17 +401,114 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
     });
   }
 
-  // ---------------- Stars ----------------
+  // ---------------- Background doodles ----------------
 
-  List<_Star> _generateStars(int count) {
-    final rng = Random(42);
+  /// Scatters pen-drawn motifs (stars, hearts, rockets, sparkles, swirls, dots)
+  /// across the drawing plane like margin doodles in a sketchbook. Positions are
+  /// in WORLD space (relative to the graph centre) so the doodles pan and zoom
+  /// together with the nodes — the whole scene reads as one inked page.
+  /// Deterministic so the layout is stable across rebuilds.
+  List<_Doodle> _generateDoodles(int count) {
+    final rng = Random(7);
+    // Weighted kind pool — sparkles & dots are common, rockets rare.
+    const pool = [
+      _DoodleKind.sparkle, _DoodleKind.sparkle, _DoodleKind.dot,
+      _DoodleKind.dot, _DoodleKind.star, _DoodleKind.star,
+      _DoodleKind.heart, _DoodleKind.swirl, _DoodleKind.rocket,
+    ];
+    // World half-extent the doodles spread across (a bit wider than the graph).
+    const spread = 560.0;
     return List.generate(count, (_) {
-      return _Star(
-        Offset(rng.nextDouble(), rng.nextDouble()),
-        rng.nextDouble() * 0.8 + 0.3,
-        rng.nextDouble() * 0.30 + 0.06,
+      final kind = pool[rng.nextInt(pool.length)];
+      final size = switch (kind) {
+        _DoodleKind.rocket => 30.0 + rng.nextDouble() * 16,
+        _DoodleKind.heart => 16.0 + rng.nextDouble() * 12,
+        _DoodleKind.star => 14.0 + rng.nextDouble() * 14,
+        _DoodleKind.swirl => 16.0 + rng.nextDouble() * 12,
+        _DoodleKind.sparkle => 9.0 + rng.nextDouble() * 12,
+        _DoodleKind.dot => 2.5 + rng.nextDouble() * 3,
+      };
+      return _Doodle(
+        kind,
+        Offset((rng.nextDouble() - 0.5) * 2 * spread,
+            (rng.nextDouble() - 0.5) * 2 * spread),
+        size,
+        (rng.nextDouble() - 0.5) * 0.7,
+        // Larger motifs are drawn fainter so the page never feels busy.
+        (kind == _DoodleKind.dot ? 0.18 : 0.11) + rng.nextDouble() * 0.05,
+        _buildDoodlePath(kind, rng),
       );
     });
+  }
+
+  /// Builds a pen-drawn motif path in local space, centred at origin, sized to
+  /// roughly fit within a unit box (scaled by [_Doodle.size] at draw time).
+  static ui.Path _buildDoodlePath(_DoodleKind kind, Random rng) {
+    final p = ui.Path();
+    switch (kind) {
+      case _DoodleKind.star:
+        // 5-point star outline with a touch of hand wobble.
+        const points = 5;
+        for (int i = 0; i <= points * 2; i++) {
+          final isOuter = i.isEven;
+          final rr = (isOuter ? 0.5 : 0.21) * (1 + (rng.nextDouble() - 0.5) * 0.1);
+          final a = -pi / 2 + i * pi / points;
+          final x = cos(a) * rr, y = sin(a) * rr;
+          i == 0 ? p.moveTo(x, y) : p.lineTo(x, y);
+        }
+        p.close();
+        break;
+      case _DoodleKind.heart:
+        // Two lobes + point, traced with cubics.
+        p.moveTo(0, 0.32);
+        p.cubicTo(-0.55, -0.12, -0.32, -0.52, 0, -0.18);
+        p.cubicTo(0.32, -0.52, 0.55, -0.12, 0, 0.32);
+        p.close();
+        break;
+      case _DoodleKind.rocket:
+        // Body, nose, fins, and a little exhaust tick.
+        p.moveTo(0, -0.5);
+        p.cubicTo(0.26, -0.28, 0.26, 0.12, 0.14, 0.30);
+        p.lineTo(-0.14, 0.30);
+        p.cubicTo(-0.26, 0.12, -0.26, -0.28, 0, -0.5);
+        p.close();
+        // left fin
+        p.moveTo(-0.14, 0.16);
+        p.lineTo(-0.34, 0.40);
+        p.lineTo(-0.12, 0.30);
+        // right fin
+        p.moveTo(0.14, 0.16);
+        p.lineTo(0.34, 0.40);
+        p.lineTo(0.12, 0.30);
+        // window
+        p.addOval(Rect.fromCircle(center: const Offset(0, -0.08), radius: 0.10));
+        break;
+      case _DoodleKind.sparkle:
+        // Four-point twinkle: concave diamond.
+        const r = 0.5, w = 0.10;
+        p.moveTo(0, -r);
+        p.quadraticBezierTo(w, -w, r, 0);
+        p.quadraticBezierTo(w, w, 0, r);
+        p.quadraticBezierTo(-w, w, -r, 0);
+        p.quadraticBezierTo(-w, -w, 0, -r);
+        p.close();
+        break;
+      case _DoodleKind.swirl:
+        // Open spiral.
+        const turns = 1.6, steps = 26;
+        for (int i = 0; i <= steps; i++) {
+          final t = i / steps;
+          final a = t * turns * 2 * pi;
+          final rr = 0.06 + t * 0.42;
+          final x = cos(a) * rr, y = sin(a) * rr;
+          i == 0 ? p.moveTo(x, y) : p.lineTo(x, y);
+        }
+        break;
+      case _DoodleKind.dot:
+        p.addOval(Rect.fromCircle(center: Offset.zero, radius: 0.5));
+        break;
+    }
+    return p;
   }
 
   // ---------------- Layout (FR) ----------------
@@ -470,6 +605,7 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
         ringDepth: ringDepths[i],
         emojiPainter: _buildEmojiPainter(u.emoji, r),
         namePainter: r >= 11 ? _buildNamePainter(u.name, r) : null,
+        penSeed: u.id.hashCode,
       ));
     }
 
@@ -493,6 +629,9 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
           _edgeThickness(c.level),
           _edgeOpacity(c.level),
           isPrimary: isPrimary,
+          // Solid only for strong ties; weaker relationships stay dotted.
+          dashed: c.level != RelationshipLevel.closeFriend &&
+              c.level != RelationshipLevel.bestFriend,
         ));
       }
     }
@@ -561,7 +700,11 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
     return TextPainter(
       text: TextSpan(
         text: emoji,
-        style: TextStyle(fontSize: r * 0.85, color: Colors.black),
+        style: TextStyle(
+          fontSize: r * 0.82,
+          color: _kInk,
+          fontFamily: AppTheme.bodyFamily,
+        ),
       ),
       textDirection: TextDirection.ltr,
     )..layout();
@@ -572,10 +715,11 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
       text: TextSpan(
         text: name,
         style: TextStyle(
-          color: Colors.white.withValues(alpha: 0.78),
+          color: _kInk.withValues(alpha: 0.85),
           fontSize: r < 16 ? 8.5 : 10,
-          fontWeight: FontWeight.w400,
+          fontWeight: FontWeight.w500,
           letterSpacing: 0.2,
+          fontFamily: AppTheme.bodyFamily,
         ),
       ),
       textDirection: TextDirection.ltr,
@@ -822,7 +966,7 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
           child: CustomPaint(
             size: size,
             painter: _GraphPainter(
-              stars: _stars,
+              doodles: _doodles,
               worldNodes: _worldNodes,
               worldEdges: _worldEdges,
               is3D: widget.is3D,
@@ -1521,7 +1665,7 @@ class _FRLayout {
 class _GraphPainter extends CustomPainter {
   static const double _fov = 460.0;
 
-  final List<_Star> stars;
+  final List<_Doodle> doodles;
   final List<_WorldNode> worldNodes;
   final List<_WorldEdge> worldEdges;
   final bool is3D;
@@ -1541,16 +1685,21 @@ class _GraphPainter extends CustomPainter {
   final _fillPaint = Paint();
   final _rimPaint = Paint()
     ..style = PaintingStyle.stroke
-    ..strokeWidth = 0.8;
+    ..strokeWidth = 0.8
+    ..strokeCap = StrokeCap.round
+    ..strokeJoin = StrokeJoin.round;
   final _glowPaint = Paint();
-  final _edgePaint = Paint()..strokeCap = StrokeCap.round;
+  final _edgePaint = Paint()
+    ..style = PaintingStyle.stroke
+    ..strokeCap = StrokeCap.round
+    ..strokeJoin = StrokeJoin.round;
 
-  // Cached background + stars picture, invalidated only when size changes.
+  // Cached paper + doodles picture, invalidated only when size changes.
   ui.Picture? _bgPicture;
   Size _bgPictureSize = Size.zero;
 
   _GraphPainter({
-    required this.stars,
+    required this.doodles,
     required this.worldNodes,
     required this.worldEdges,
     required this.is3D,
@@ -1572,7 +1721,7 @@ class _GraphPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    _drawBgAndStars(canvas, size);
+    _drawPaper(canvas, size);
     if (worldNodes.isEmpty) return;
 
     canvas.save();
@@ -1581,6 +1730,10 @@ class _GraphPainter extends CustomPainter {
     canvas.translate(cx + view.pan.dx, cy + view.pan.dy);
     canvas.scale(view.scale);
     canvas.translate(-cx, -cy);
+
+    // Pen doodles live on the same drawing plane as the nodes (world space),
+    // so they pan/zoom with the graph and sit behind the edges and nodes.
+    _drawDoodles(canvas, cx, cy);
 
     // Compute screen positions in painter-space (pre view-transform).
     final n = worldNodes.length;
@@ -1642,10 +1795,20 @@ class _GraphPainter extends CustomPainter {
             alpha = e.opacity * 0.20;
           }
         }
+        // Ink pen lines on cream. Stronger ties read darker; weak ties are a
+        // light dotted pen trail. Width is comp-compensated so lines don't
+        // fatten as you zoom in (matching the held-constant node size).
         _edgePaint
-          ..color = Colors.white.withValues(alpha: alpha)
-          ..strokeWidth = width;
-        canvas.drawLine(posList[e.fromIdx], posList[e.toIdx], _edgePaint);
+          ..color = _kInk.withValues(alpha: (alpha * 1.4).clamp(0.0, 0.85))
+          ..strokeWidth = width * comp;
+        _drawSketchEdge(
+          canvas,
+          posList[e.fromIdx],
+          posList[e.toIdx],
+          _edgePaint,
+          e.fromIdx * 911 + e.toIdx,
+          dashed: e.dashed,
+        );
       }
     }
 
@@ -1662,29 +1825,106 @@ class _GraphPainter extends CustomPainter {
     canvas.restore();
   }
 
-  /// Renders background color + static stars into a cached Picture.
-  /// Only rebuilds when the canvas size changes — zero cost during rotation.
-  void _drawBgAndStars(Canvas canvas, Size size) {
+  /// Renders the cream sketchbook page — paper wash, a faint dot grid, and
+  /// scattered pen-drawn doodles — into a cached Picture. Only rebuilds when the
+  /// canvas size changes, so it costs nothing during pan / zoom / rotation.
+  void _drawPaper(Canvas canvas, Size size) {
     if (_bgPicture == null || _bgPictureSize != size) {
       final recorder = ui.PictureRecorder();
       final c = Canvas(recorder);
+      final full = Rect.fromLTWH(0, 0, size.width, size.height);
+
+      // Warm paper with a barely-there top-to-bottom shading.
       c.drawRect(
-        Rect.fromLTWH(0, 0, size.width, size.height),
-        Paint()..color = const Color(0xFF080808),
+        full,
+        Paint()
+          ..shader = const LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [_kPaper, _kPaperLow],
+          ).createShader(full),
       );
-      final p = Paint();
-      for (final s in stars) {
-        p.color = Colors.white.withValues(alpha: s.opacity);
-        c.drawCircle(
-          Offset(s.pos.dx * size.width, s.pos.dy * size.height),
-          s.size,
-          p,
-        );
+
+      // Faint bullet-journal dot grid for that notebook-page feel. This stays
+      // fixed to the page — the inked drawing (doodles + nodes) moves over it.
+      const gap = 26.0;
+      final dotPaint = Paint()..color = _kInk.withValues(alpha: 0.05);
+      for (double y = gap; y < size.height; y += gap) {
+        for (double x = gap; x < size.width; x += gap) {
+          c.drawCircle(Offset(x, y), 0.9, dotPaint);
+        }
       }
+
       _bgPicture = recorder.endRecording();
       _bgPictureSize = size;
     }
     canvas.drawPicture(_bgPicture!);
+  }
+
+  /// Draws the pen-ink margin doodles in WORLD space — called inside the view
+  /// transform so they pan and zoom together with the nodes.
+  void _drawDoodles(Canvas canvas, double cx, double cy) {
+    final stroke = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+    final fillP = Paint()..style = PaintingStyle.fill;
+    for (final d in doodles) {
+      canvas.save();
+      canvas.translate(cx + d.pos.dx, cy + d.pos.dy);
+      canvas.rotate(d.rotation);
+      canvas.scale(d.size);
+      if (d.kind == _DoodleKind.dot) {
+        fillP.color = _kInk.withValues(alpha: d.opacity);
+        canvas.drawPath(d.path, fillP);
+      } else {
+        stroke
+          ..color = _kInk.withValues(alpha: d.opacity)
+          ..strokeWidth = 1.5 / d.size; // ~1.5px after the scale.
+        canvas.drawPath(d.path, stroke);
+      }
+      canvas.restore();
+    }
+  }
+
+  /// Draws an edge as a gently wavering hand-drawn pen line (a single cubic with
+  /// two seeded perpendicular bumps) instead of a ruler-straight segment. When
+  /// [dashed] is set the line is rendered as a hand-drawn dotted/dashed trail.
+  void _drawSketchEdge(
+      Canvas canvas, Offset a, Offset b, Paint paint, int seed,
+      {bool dashed = false}) {
+    final dx = b.dx - a.dx;
+    final dy = b.dy - a.dy;
+    final len = sqrt(dx * dx + dy * dy);
+    if (len < 6) {
+      canvas.drawLine(a, b, paint);
+      return;
+    }
+    // Perpendicular unit vector — the wobble pushes the line off-axis.
+    final nx = -dy / len;
+    final ny = dx / len;
+    final amp = (len * 0.04).clamp(1.5, 9.0);
+    final o1 = _seedNoise(seed) * amp;
+    final o2 = _seedNoise(seed * 31 + 7) * amp;
+    final c1 = Offset(a.dx + dx * 0.33 + nx * o1, a.dy + dy * 0.33 + ny * o1);
+    final c2 = Offset(a.dx + dx * 0.66 + nx * o2, a.dy + dy * 0.66 + ny * o2);
+    final path = ui.Path()
+      ..moveTo(a.dx, a.dy)
+      ..cubicTo(c1.dx, c1.dy, c2.dx, c2.dy, b.dx, b.dy);
+    if (!dashed) {
+      canvas.drawPath(path, paint);
+      return;
+    }
+    // Walk the curve and stamp dashes with small gaps for a dotted-pen look.
+    const dash = 5.0, gapLen = 4.5;
+    for (final metric in path.computeMetrics()) {
+      double dist = 0;
+      while (dist < metric.length) {
+        final end = min(dist + dash, metric.length);
+        canvas.drawPath(metric.extractPath(dist, end), paint);
+        dist = end + gapLen;
+      }
+    }
   }
 
   void _drawNode(Canvas canvas, _WorldNode node, Offset pos, double r) {
@@ -1695,8 +1935,8 @@ class _GraphPainter extends CustomPainter {
     bool showGlow;
 
     if (useConcentricLayout && !is3D && node.ringDepth >= 0) {
-      // Ring-depth-based emphasis (home tab concentric mode).
-      fill = isSelf ? Colors.white : node.user.nodeColor;
+      // Ring-depth-based emphasis (concentric mode).
+      fill = isSelf ? _kAccent : node.user.nodeColor;
       final depth = node.ringDepth;
       if (depth <= 1) {
         globalOpacity = 1.0;
@@ -1718,7 +1958,7 @@ class _GraphPainter extends CustomPainter {
           highlightedIds == null || highlightedIds!.contains(node.user.id);
 
       if (isSelf) {
-        fill = Colors.white;
+        fill = _kAccent;
       } else if (!primary) {
         fill = _desaturate(node.user.nodeColor, 1.0);
       } else {
@@ -1735,37 +1975,89 @@ class _GraphPainter extends CustomPainter {
       showGlow = primary && highlighted;
     }
 
-    // Soft glow via layered circles — no MaskFilter.blur, much cheaper.
+    // Every node ring uses the same near-black indigo pen line — unified ink.
+    // Each node's identity comes from its pastel disc wash, not the outline.
+    const ink = _kInkLine;
+
+    // The icon disc sits inside the outer ring with a clear gap between the two
+    // pen circles, giving the "double circle" look.
+    final gap = (r * 0.24).clamp(3.0, 7.0);
+    final rIcon = (r - gap).clamp(r * 0.5, r);
+
+    // Whisper-soft pastel halo for emphasised nodes (no blur — layered circles).
     if (showGlow) {
-      final glowColor = isSelf ? Colors.white : fill;
-      _glowPaint.color = glowColor.withValues(alpha: 0.06 * globalOpacity);
-      canvas.drawCircle(pos, r * 1.9, _glowPaint);
-      _glowPaint.color = glowColor.withValues(alpha: 0.14 * globalOpacity);
-      canvas.drawCircle(pos, r * 1.4, _glowPaint);
+      _glowPaint.color = fill.withValues(alpha: 0.10 * globalOpacity);
+      canvas.drawCircle(pos, r * 1.7, _glowPaint);
     }
 
-    _fillPaint.color = fill.withValues(alpha: globalOpacity);
+    // Opaque paper backing out to the OUTER ring, so edges running behind the
+    // node never show through the (paper-coloured) gap or a translucent icon.
+    _fillPaint.color = _kPaper;
     canvas.drawCircle(pos, r, _fillPaint);
 
-    _rimPaint.color = Colors.white.withValues(alpha: 0.25 * globalOpacity);
-    canvas.drawCircle(pos, r, _rimPaint);
+    // Pastel wash filling the icon disc so the glyph/photo sits on its colour.
+    _fillPaint.color = fill.withValues(alpha: 0.45 * globalOpacity);
+    canvas.drawCircle(pos, rIcon, _fillPaint);
 
-    if (globalOpacity < 0.35) return;
+    final detailed = globalOpacity >= 0.35;
 
-    final profileImg = isSelf ? null : profileImages[node.user.id];
-    if (profileImg != null) {
-      // Draw circular profile photo on top of the filled circle.
-      _drawProfileImage(canvas, profileImg, pos, r, globalOpacity);
-    } else {
-      // Emoji fallback — use pre-cached TextPainter; layout() already done at build time.
-      final ep = node.emojiPainter;
-      ep.paint(canvas, pos - Offset(ep.width / 2, ep.height / 2));
+    // ---- Icon (photo or emoji) inside the inner disc ----
+    if (detailed) {
+      final profileImg = isSelf ? null : profileImages[node.user.id];
+      if (profileImg != null) {
+        _drawProfileImage(canvas, profileImg, pos, rIcon, globalOpacity);
+      } else {
+        // Scale the pre-cached emoji to fit the (smaller) inner disc.
+        final ep = node.emojiPainter;
+        canvas.save();
+        canvas.translate(pos.dx, pos.dy);
+        final s = (rIcon / r).clamp(0.5, 1.0);
+        canvas.scale(s);
+        ep.paint(canvas, Offset(-ep.width / 2, -ep.height / 2));
+        canvas.restore();
+      }
     }
 
-    // Name label below the node.
+    // ---- Inner pen ring hugging the icon disc (circle #1) ----
+    _drawPenRing(canvas, pos, rIcon, ink, isSelf ? 1.9 : 1.4,
+        0.8 * globalOpacity, node.penSeed);
+
+    // ---- Outer pen ring with a doubled pass — the encircle (circle #2) ----
+    _drawPenRing(canvas, pos, r, ink, isSelf ? 2.4 : 1.9, globalOpacity,
+        node.penSeed ^ 0x9e3779b9,
+        doubled: true);
+
+    if (!detailed) return;
+
+    // Name label below the outer ring.
     if (globalOpacity > 0.5 && node.namePainter != null) {
       final np = node.namePainter!;
-      np.paint(canvas, Offset(pos.dx - np.width / 2, pos.dy + r + 4));
+      np.paint(canvas, Offset(pos.dx - np.width / 2, pos.dy + r + 5));
+    }
+  }
+
+  /// Strokes a clean true-circle pen ring with a pen-like texture. The circle
+  /// itself is perfectly round; the hand-drawn feel comes from rounded caps and,
+  /// when [doubled] is set, a faint second pass nudged a sub-pixel amount (seeded
+  /// by [seed]) that mimics a biro re-trace — no jagged vertices.
+  void _drawPenRing(Canvas canvas, Offset pos, double radius, Color ink,
+      double widthPx, double opacity, int seed,
+      {bool doubled = false}) {
+    // The whole canvas is scaled by view.scale, which would otherwise fatten the
+    // stroke on zoom-in. Multiply by the same `comp` factor the node radius uses
+    // so the on-screen pen width tracks the (held-constant) node size.
+    final comp = (1.0 / view.scale).clamp(0.45, 1.7);
+    _rimPaint
+      ..color = ink.withValues(alpha: (0.95 * opacity).clamp(0.0, 1.0))
+      ..strokeWidth = widthPx * comp;
+    canvas.drawCircle(pos, radius, _rimPaint);
+    if (doubled) {
+      final ox = _seedNoise(seed) * 0.7 * comp;
+      final oy = _seedNoise(seed * 7 + 3) * 0.7 * comp;
+      _rimPaint
+        ..color = ink.withValues(alpha: (0.45 * opacity).clamp(0.0, 1.0))
+        ..strokeWidth = widthPx * 0.7 * comp;
+      canvas.drawCircle(pos.translate(ox, oy), radius, _rimPaint);
     }
   }
 

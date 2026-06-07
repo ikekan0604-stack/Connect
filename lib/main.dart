@@ -73,10 +73,10 @@ class _NavBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      decoration: const BoxDecoration(
-        color: Color(0xFF0A0A0A),
+      decoration: BoxDecoration(
+        color: AppTheme.surface,
         border: Border(
-          top: BorderSide(color: Color(0xFF1A1A1A), width: 0.5),
+          top: BorderSide(color: AppTheme.ink.withValues(alpha: 0.15), width: 1),
         ),
       ),
       child: SafeArea(
@@ -178,16 +178,18 @@ class _CameraNavItem extends StatelessWidget {
             height: 38,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              color: active ? Colors.white : const Color(0xFF1A1A1A),
+              color: active ? AppTheme.accent : AppTheme.surfaceElevated,
               border: Border.all(
-                color: active ? Colors.white : const Color(0xFF333333),
-                width: 1,
+                color: active
+                    ? AppTheme.accent
+                    : AppTheme.ink.withValues(alpha: 0.35),
+                width: 1.4,
               ),
             ),
             child: Icon(
               Icons.camera_alt_outlined,
               size: 18,
-              color: active ? Colors.black : const Color(0xFF8E8E8E),
+              color: active ? Colors.white : AppTheme.ink,
             ),
           ),
         ),

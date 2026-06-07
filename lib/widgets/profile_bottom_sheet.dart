@@ -31,9 +31,12 @@ class ProfileBottomSheet extends StatelessWidget {
       margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
       padding: const EdgeInsets.only(top: 10, bottom: 24),
       decoration: BoxDecoration(
-        color: const Color(0xFF131313),
+        color: AppTheme.surfaceElevated,
         borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+        border: Border.all(
+          color: AppTheme.ink.withValues(alpha: 0.22),
+          width: 1.4,
+        ),
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -42,7 +45,7 @@ class ProfileBottomSheet extends StatelessWidget {
             width: 32,
             height: 3,
             decoration: BoxDecoration(
-              color: Colors.white.withValues(alpha: 0.15),
+              color: AppTheme.ink.withValues(alpha: 0.15),
               borderRadius: BorderRadius.circular(2),
             ),
           ),
@@ -51,7 +54,7 @@ class ProfileBottomSheet extends StatelessWidget {
           const SizedBox(height: 18),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 24),
-            child: Divider(color: Colors.white.withValues(alpha: 0.06), height: 1),
+            child: Divider(color: AppTheme.ink.withValues(alpha: 0.06), height: 1),
           ),
           const SizedBox(height: 16),
           if (isDirect || isSelf)
@@ -80,15 +83,20 @@ class _Header extends StatelessWidget {
           height: 64,
           decoration: BoxDecoration(
             shape: BoxShape.circle,
-            color: isSelf ? Colors.white : user.nodeColor,
+            color: isSelf
+                ? AppTheme.accent.withValues(alpha: 0.20)
+                : user.nodeColor.withValues(alpha: 0.55),
+            border: Border.all(
+              color: isSelf
+                  ? AppTheme.accent
+                  : AppTheme.ink.withValues(alpha: 0.55),
+              width: 1.6,
+            ),
           ),
           alignment: Alignment.center,
           child: Text(
             user.emoji,
-            style: TextStyle(
-              fontSize: 28,
-              color: Colors.black.withValues(alpha: isSelf ? 1.0 : 0.85),
-            ),
+            style: const TextStyle(fontSize: 28, color: AppTheme.ink),
           ),
         ),
         const SizedBox(height: 12),
@@ -116,8 +124,8 @@ class _Header extends StatelessWidget {
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
                       color: filled
-                          ? Colors.white
-                          : Colors.white.withValues(alpha: 0.15),
+                          ? AppTheme.accent
+                          : AppTheme.ink.withValues(alpha: 0.18),
                     ),
                   ),
                 );
@@ -151,7 +159,7 @@ class _Header extends StatelessWidget {
           Text(
             '友達の友達',
             style: TextStyle(
-              color: Colors.white.withValues(alpha: 0.4),
+              color: AppTheme.ink.withValues(alpha: 0.4),
               fontSize: 11,
               letterSpacing: 0.5,
             ),
@@ -189,7 +197,7 @@ class _FullProfile extends StatelessWidget {
           Text(
             'INTERESTS',
             style: TextStyle(
-              color: Colors.white.withValues(alpha: 0.40),
+              color: AppTheme.ink.withValues(alpha: 0.40),
               fontSize: 10,
               fontWeight: FontWeight.w600,
               letterSpacing: 1.5,
@@ -204,10 +212,10 @@ class _FullProfile extends StatelessWidget {
                       padding: const EdgeInsets.symmetric(
                           horizontal: 9, vertical: 4),
                       decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.05),
+                        color: AppTheme.ink.withValues(alpha: 0.05),
                         borderRadius: BorderRadius.circular(20),
                         border: Border.all(
-                            color: Colors.white.withValues(alpha: 0.10)),
+                            color: AppTheme.ink.withValues(alpha: 0.10)),
                       ),
                       child: Text(
                         h,
@@ -224,9 +232,9 @@ class _FullProfile extends StatelessWidget {
             Container(
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: 0.03),
+                color: AppTheme.ink.withValues(alpha: 0.03),
                 borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+                border: Border.all(color: AppTheme.ink.withValues(alpha: 0.06)),
               ),
               child: Row(
                 children: [
@@ -236,7 +244,7 @@ class _FullProfile extends StatelessWidget {
                   Text(
                     '一緒に撮った写真',
                     style: TextStyle(
-                      color: Colors.white.withValues(alpha: 0.55),
+                      color: AppTheme.ink.withValues(alpha: 0.55),
                       fontSize: 12,
                     ),
                   ),
@@ -284,20 +292,20 @@ class _SimpleProfile extends StatelessWidget {
           Container(
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
-              color: Colors.white.withValues(alpha: 0.03),
+              color: AppTheme.ink.withValues(alpha: 0.03),
               borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+              border: Border.all(color: AppTheme.ink.withValues(alpha: 0.06)),
             ),
             child: Row(
               children: [
                 Icon(Icons.lock_outline,
-                    color: Colors.white.withValues(alpha: 0.3), size: 14),
+                    color: AppTheme.ink.withValues(alpha: 0.3), size: 14),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
                     'コネクトすると詳細を見られます',
                     style: TextStyle(
-                      color: Colors.white.withValues(alpha: 0.45),
+                      color: AppTheme.ink.withValues(alpha: 0.45),
                       fontSize: 11,
                     ),
                   ),
@@ -324,7 +332,7 @@ class _StatCell extends StatelessWidget {
           Text(
             label.toUpperCase(),
             style: TextStyle(
-              color: Colors.white.withValues(alpha: 0.35),
+              color: AppTheme.ink.withValues(alpha: 0.35),
               fontSize: 9,
               letterSpacing: 1.2,
               fontWeight: FontWeight.w600,
@@ -352,7 +360,7 @@ class _Sep extends StatelessWidget {
     return Container(
       width: 1,
       height: 18,
-      color: Colors.white.withValues(alpha: 0.08),
+      color: AppTheme.ink.withValues(alpha: 0.08),
     );
   }
 }

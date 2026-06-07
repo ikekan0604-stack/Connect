@@ -3,10 +3,13 @@ import 'package:flutter/material.dart';
 import '../models/user.dart';
 import '../models/connection.dart';
 
-// ---------------- Color helpers (muted palette for BeReal-style) ----------------
+// ---------------- Color helpers (poppy pastel palette, GRAVITY-style) ----------------
 
+// Saturation is boosted from the original muted values so nodes read as bright
+// candy pastels on the navy canvas rather than washed-out greys.
 Color _muted(double hue, [double sat = 0.20, double light = 0.74]) {
-  return HSLColor.fromAHSL(1.0, hue, sat, light).toColor();
+  final popSat = (sat * 2.6).clamp(0.0, 0.72);
+  return HSLColor.fromAHSL(1.0, hue, popSat, light).toColor();
 }
 
 // ---------------- Self ----------------

@@ -109,7 +109,7 @@ class _MyPageScreenState extends State<MyPageScreen>
           indicatorColor: AppTheme.accent,
           indicatorWeight: 2,
           labelColor: AppTheme.accent,
-          unselectedLabelColor: Colors.white38,
+          unselectedLabelColor: AppTheme.textTertiary,
           labelStyle:
               const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
           tabs: const [
@@ -197,7 +197,7 @@ class _DetailedProfileTab extends StatelessWidget {
               Text(
                 'アバター変更 (準備中)',
                 style: TextStyle(
-                    color: Colors.white.withOpacity(0.3), fontSize: 11),
+                    color: AppTheme.ink.withOpacity(0.3), fontSize: 11),
               ),
             ],
           ),
@@ -250,9 +250,9 @@ class _SimpleProfileTab extends StatelessWidget {
         Container(
           padding: const EdgeInsets.all(14),
           decoration: BoxDecoration(
-            color: Colors.white.withOpacity(0.04),
+            color: AppTheme.ink.withOpacity(0.04),
             borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: Colors.white12),
+            border: Border.all(color: AppTheme.ink.withValues(alpha: 0.18)),
           ),
           child: const Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -260,14 +260,14 @@ class _SimpleProfileTab extends StatelessWidget {
               Text(
                 '簡易プロフィールについて',
                 style: TextStyle(
-                    color: Colors.white70,
+                    color: AppTheme.textSecondary,
                     fontSize: 13,
                     fontWeight: FontWeight.w600),
               ),
               SizedBox(height: 6),
               Text(
                 '直接コネクトしていないユーザーには、ここで設定した限られた情報のみが表示されます。詳細は直接コネクトしてから公開されます。',
-                style: TextStyle(color: Colors.white38, fontSize: 12, height: 1.5),
+                style: TextStyle(color: AppTheme.textTertiary, fontSize: 12, height: 1.5),
               ),
             ],
           ),
@@ -290,16 +290,18 @@ class _SectionLabel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = accent ? AppTheme.accent : Colors.white54;
+    final color = accent ? AppTheme.accent : AppTheme.textSecondary;
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: accent
             ? AppTheme.accent.withOpacity(0.08)
-            : Colors.white.withOpacity(0.04),
+            : AppTheme.ink.withOpacity(0.04),
         borderRadius: BorderRadius.circular(12),
         border: Border.all(
-          color: accent ? AppTheme.accent.withOpacity(0.3) : Colors.white12,
+          color: accent
+              ? AppTheme.accent.withValues(alpha: 0.4)
+              : AppTheme.ink.withValues(alpha: 0.18),
         ),
       ),
       child: Row(
@@ -352,7 +354,7 @@ class _Field extends StatelessWidget {
             controller: ctrl,
             maxLines: maxLines,
             keyboardType: keyboardType,
-            style: const TextStyle(color: Colors.white, fontSize: 14),
+            style: const TextStyle(color: AppTheme.ink, fontSize: 14),
             decoration: InputDecoration(hintText: hint),
           ),
         ],
@@ -370,12 +372,12 @@ class _BannerSection extends StatelessWidget {
         Row(
           children: [
             Icon(Icons.workspace_premium_outlined,
-                color: Colors.white.withValues(alpha: 0.6), size: 14),
+                color: AppTheme.ink.withValues(alpha: 0.6), size: 14),
             const SizedBox(width: 6),
             Text(
               'BANNERS',
               style: TextStyle(
-                color: Colors.white.withValues(alpha: 0.5),
+                color: AppTheme.ink.withValues(alpha: 0.5),
                 fontSize: 10,
                 fontWeight: FontWeight.w600,
                 letterSpacing: 1.5,
@@ -419,11 +421,11 @@ class _BannerTile extends StatelessWidget {
     return Container(
       decoration: BoxDecoration(
         color: unlocked
-            ? Colors.white.withValues(alpha: 0.06)
+            ? AppTheme.ink.withValues(alpha: 0.06)
             : Colors.transparent,
         borderRadius: BorderRadius.circular(8),
         border: Border.all(
-          color: Colors.white.withValues(alpha: unlocked ? 0.15 : 0.06),
+          color: AppTheme.ink.withValues(alpha: unlocked ? 0.15 : 0.06),
         ),
       ),
       child: Column(
@@ -433,16 +435,16 @@ class _BannerTile extends StatelessWidget {
             unlocked ? Icons.check_circle_outline : Icons.lock_outline,
             size: 14,
             color: unlocked
-                ? Colors.white.withValues(alpha: 0.7)
-                : Colors.white.withValues(alpha: 0.15),
+                ? AppTheme.ink.withValues(alpha: 0.7)
+                : AppTheme.ink.withValues(alpha: 0.15),
           ),
           const SizedBox(height: 3),
           Text(
             label,
             style: TextStyle(
               color: unlocked
-                  ? Colors.white.withValues(alpha: 0.8)
-                  : Colors.white.withValues(alpha: 0.20),
+                  ? AppTheme.ink.withValues(alpha: 0.8)
+                  : AppTheme.ink.withValues(alpha: 0.20),
               fontSize: 9.5,
               fontWeight: FontWeight.w500,
             ),

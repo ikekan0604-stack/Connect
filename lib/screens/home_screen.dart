@@ -100,7 +100,7 @@ class _HomeScreenState extends State<HomeScreen> {
             users: visible.users,
             connections: visible.connections,
             is3D: _is3D,
-            useConcentricLayout: true,
+            useConcentricLayout: false,
             fadeNonDirect: true,
             showEdges: true,
             onNodeLongPress: _onNodeLongPress,
@@ -115,14 +115,14 @@ class _HomeScreenState extends State<HomeScreen> {
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text(
+              Text(
                 'CONNECT',
-                style: TextStyle(
+                style: AppTheme.display(const TextStyle(
                   color: AppTheme.textPrimary,
-                  fontSize: 18,
+                  fontSize: 20,
                   fontWeight: FontWeight.w600,
-                  letterSpacing: 4.5,
-                ),
+                  letterSpacing: 4.0,
+                )),
               ),
               const Spacer(),
               _IconBtn(
@@ -168,7 +168,7 @@ class _HomeScreenState extends State<HomeScreen> {
               child: Text(
                 '一本指で回転 ・ 二本指でズーム/移動',
                 style: TextStyle(
-                  color: Colors.white.withValues(alpha: 0.18),
+                  color: AppTheme.ink.withValues(alpha: 0.45),
                   fontSize: 10,
                   letterSpacing: 0.5,
                 ),
@@ -206,20 +206,21 @@ class _IconBtn extends StatelessWidget {
           height: 26,
           decoration: BoxDecoration(
             color: active
-                ? Colors.white.withValues(alpha: 0.14)
-                : Colors.white.withValues(alpha: 0.06),
-            borderRadius: BorderRadius.circular(6),
+                ? AppTheme.accent.withValues(alpha: 0.16)
+                : AppTheme.surface.withValues(alpha: 0.85),
+            borderRadius: BorderRadius.circular(8),
             border: Border.all(
-              color: Colors.white.withValues(alpha: active ? 0.3 : 0.15),
+              color: active
+                  ? AppTheme.accent
+                  : AppTheme.ink.withValues(alpha: 0.3),
+              width: 1.4,
             ),
           ),
           alignment: Alignment.center,
           child: Icon(
             icon,
             size: 14,
-            color: active
-                ? Colors.white
-                : Colors.white.withValues(alpha: 0.75),
+            color: active ? AppTheme.accent : AppTheme.ink,
           ),
         ),
       ),
@@ -241,17 +242,20 @@ class _ModeChip extends StatelessWidget {
         width: 36,
         height: 26,
         decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: 0.06),
-          borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: Colors.white.withValues(alpha: 0.18)),
+          color: AppTheme.surface.withValues(alpha: 0.85),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: AppTheme.ink.withValues(alpha: 0.3),
+            width: 1.4,
+          ),
         ),
         alignment: Alignment.center,
         child: Text(
           label,
           style: const TextStyle(
-            color: AppTheme.textPrimary,
+            color: AppTheme.ink,
             fontSize: 11,
-            fontWeight: FontWeight.w600,
+            fontWeight: FontWeight.w700,
             letterSpacing: 1,
           ),
         ),
@@ -281,9 +285,12 @@ class _SettingsPanel extends StatelessWidget {
       width: 240,
       padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
       decoration: BoxDecoration(
-        color: const Color(0xFF111111).withValues(alpha: 0.94),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+        color: AppTheme.surfaceElevated.withValues(alpha: 0.97),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: AppTheme.ink.withValues(alpha: 0.25),
+          width: 1.4,
+        ),
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -292,9 +299,9 @@ class _SettingsPanel extends StatelessWidget {
           Text(
             'DEBUG',
             style: TextStyle(
-              color: Colors.white.withValues(alpha: 0.35),
+              color: AppTheme.ink.withValues(alpha: 0.45),
               fontSize: 9,
-              fontWeight: FontWeight.w600,
+              fontWeight: FontWeight.w700,
               letterSpacing: 1.5,
             ),
           ),
@@ -351,7 +358,7 @@ class _SliderRow extends StatelessWidget {
           child: Text(
             label,
             style: TextStyle(
-              color: Colors.white.withValues(alpha: 0.55),
+              color: AppTheme.ink.withValues(alpha: 0.7),
               fontSize: 11,
               letterSpacing: 0.3,
             ),
@@ -362,11 +369,11 @@ class _SliderRow extends StatelessWidget {
             data: SliderThemeData(
               trackHeight: 1.5,
               thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 5),
-              activeTrackColor: Colors.white.withValues(alpha: 0.75),
-              inactiveTrackColor: Colors.white.withValues(alpha: 0.10),
-              thumbColor: Colors.white,
+              activeTrackColor: AppTheme.accent,
+              inactiveTrackColor: AppTheme.ink.withValues(alpha: 0.15),
+              thumbColor: AppTheme.accent,
               overlayShape: const RoundSliderOverlayShape(overlayRadius: 12),
-              overlayColor: Colors.white.withValues(alpha: 0.08),
+              overlayColor: AppTheme.accent.withValues(alpha: 0.12),
               tickMarkShape: SliderTickMarkShape.noTickMark,
             ),
             child: Slider(
