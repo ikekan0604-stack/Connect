@@ -2007,11 +2007,14 @@ class _GraphPainter extends CustomPainter {
       if (profileImg != null) {
         _drawProfileImage(canvas, profileImg, pos, rIcon, globalOpacity);
       } else {
-        // Scale the pre-cached emoji to fit the (smaller) inner disc.
+        // The emoji painter was built at fontSize ∝ node.baseRadius (the layout
+        // radius). Scaling by rIcon / baseRadius — NOT rIcon / r — keeps the
+        // glyph proportional to the comp-compensated icon disc, so it stays a
+        // constant on-screen size on zoom instead of fattening with view.scale.
         final ep = node.emojiPainter;
         canvas.save();
         canvas.translate(pos.dx, pos.dy);
-        final s = (rIcon / r).clamp(0.5, 1.0);
+        final s = (rIcon / node.baseRadius).clamp(0.2, 1.0);
         canvas.scale(s);
         ep.paint(canvas, Offset(-ep.width / 2, -ep.height / 2));
         canvas.restore();
@@ -2029,10 +2032,17 @@ class _GraphPainter extends CustomPainter {
 
     if (!detailed) return;
 
-    // Name label below the outer ring.
+    // Name label below the outer ring. The painter is a fixed layout-time size,
+    // so comp-compensate it (around the node's bottom edge) to keep the label a
+    // constant on-screen size and gap on zoom — matching the node and rings.
     if (globalOpacity > 0.5 && node.namePainter != null) {
       final np = node.namePainter!;
-      np.paint(canvas, Offset(pos.dx - np.width / 2, pos.dy + r + 5));
+      final comp = (1.0 / view.scale).clamp(0.45, 1.7);
+      canvas.save();
+      canvas.translate(pos.dx, pos.dy + r);
+      canvas.scale(comp);
+      np.paint(canvas, Offset(-np.width / 2, 5));
+      canvas.restore();
     }
   }
 
