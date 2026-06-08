@@ -35,11 +35,6 @@ class _WorldNode {
   // Pre-built at layout time — never recreated during rotation
   final TextPainter emojiPainter;
   final TextPainter? namePainter; // null when baseRadius < 11
-  /// "Dry-brush" unit circles (radius ~1): perfectly round but broken into
-  /// seeded ink/skip runs so the stroke reads like a real, slightly-starved pen
-  /// line instead of a clean vector ring. One for each ring of the double circle.
-  final ui.Path scratchInner;
-  final ui.Path scratchOuter;
 
   _WorldNode({
     required this.user,
@@ -50,8 +45,6 @@ class _WorldNode {
     this.ringDepth = -1,
     required this.emojiPainter,
     this.namePainter,
-    required this.scratchInner,
-    required this.scratchOuter,
   });
 
   void dispose() {
@@ -240,6 +233,10 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
   /// Eased animation progress exposed to the painter via ValueNotifier.
   final ValueNotifier<double> _animT = ValueNotifier(1.0);
 
+  // Procedurally-generated seamless ink-grain texture, used to give pen strokes
+  // a real dry-brush (かすれ) texture instead of faking it with vector tricks.
+  ui.Image? _grain;
+
   // Listener-based gesture state (avoids gesture arena — fixes Flutter web button taps)
   final Map<int, Offset> _pointers = {};
   Offset? _prevFocal;
@@ -256,6 +253,7 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
   void initState() {
     super.initState();
     _doodles = _generateDoodles(46);
+    _generateGrain();
     PaintingBinding.instance.systemFonts.addListener(_onFontsLoaded);
 
     _animCtrl = AnimationController(
@@ -279,8 +277,72 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
     for (final img in _profileImages.values) {
       img.dispose();
     }
+    _grain?.dispose();
     _view.dispose();
     super.dispose();
+  }
+
+  // ---------------- Ink-grain texture ----------------
+
+  /// Builds a small SEAMLESS ink-grain image (white RGB, varying alpha) from a
+  /// few octaves of tileable value noise. Used as a `BlendMode.dstIn` mask so
+  /// pen strokes keep their ink only where the grain is opaque — a real
+  /// dry-brush texture rather than a vector approximation.
+  void _generateGrain() {
+    const size = 96;
+    final rng = Random(99);
+
+    List<double> lattice(int cells) =>
+        List<double>.generate(cells * cells, (_) => rng.nextDouble());
+
+    double sample(List<double> lat, int cells, double u, double w) {
+      final fx = u * cells, fy = w * cells;
+      final x0 = fx.floor() % cells, y0 = fy.floor() % cells;
+      final x1 = (x0 + 1) % cells, y1 = (y0 + 1) % cells;
+      final tx = fx - fx.floor(), ty = fy - fy.floor();
+      final sx = tx * tx * (3 - 2 * tx);
+      final sy = ty * ty * (3 - 2 * ty);
+      final a = lat[y0 * cells + x0], b = lat[y0 * cells + x1];
+      final c = lat[y1 * cells + x0], d = lat[y1 * cells + x1];
+      final top = a + (b - a) * sx;
+      final bot = c + (d - c) * sx;
+      return top + (bot - top) * sy;
+    }
+
+    final lat1 = lattice(8); // broad dry streaks
+    final lat2 = lattice(16); // mid clumps
+    final lat3 = lattice(32); // fine grain
+    final pixels = Uint8List(size * size * 4);
+    for (int y = 0; y < size; y++) {
+      for (int x = 0; x < size; x++) {
+        final u = x / size, w = y / size;
+        final v = sample(lat1, 8, u, w) * 0.5 +
+            sample(lat2, 16, u, w) * 0.32 +
+            sample(lat3, 32, u, w) * 0.18;
+        // Map noise → ink-keep alpha: dry holes where low, full ink where high.
+        // A 0.12 floor keeps a faint ghost so lines never fully vanish.
+        double a = ((v - 0.34) / 0.40).clamp(0.0, 1.0);
+        a = a * 0.88 + 0.12;
+        final idx = (y * size + x) * 4;
+        pixels[idx] = 255;
+        pixels[idx + 1] = 255;
+        pixels[idx + 2] = 255;
+        pixels[idx + 3] = (a * 255).round();
+      }
+    }
+    ui.decodeImageFromPixels(
+      pixels,
+      size,
+      size,
+      ui.PixelFormat.rgba8888,
+      (img) {
+        if (mounted) {
+          setState(() => _grain = img);
+        } else {
+          img.dispose();
+        }
+      },
+    );
   }
 
   void _onFontsLoaded() {
@@ -608,8 +670,6 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
         ringDepth: ringDepths[i],
         emojiPainter: _buildEmojiPainter(u.emoji, r),
         namePainter: r >= 11 ? _buildNamePainter(u.name, r) : null,
-        scratchInner: _buildScratchyUnitCircle(u.id.hashCode),
-        scratchOuter: _buildScratchyUnitCircle(u.id.hashCode ^ 0x5bd1e995),
       ));
     }
 
@@ -698,35 +758,6 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
     } catch (_) {
       // silently ignore — node shows kanji/emoji fallback
     }
-  }
-
-  /// Builds a perfectly round unit circle (radius ≈ 1) whose outline is broken
-  /// into seeded ink/skip runs — a "dry-brush" pen line. The geometry stays a
-  /// true circle (cos/sin at radius 1, no wobble); only the ink coverage varies,
-  /// giving the かすれ texture without any jaggedness. Deterministic per [seed].
-  static ui.Path _buildScratchyUnitCircle(int seed) {
-    const n = 144;
-    final path = ui.Path();
-    bool down = false;
-    for (int i = 0; i <= n; i++) {
-      final a = (i / n) * 2 * pi;
-      // Low-frequency "dryness" bands + fine speckle → clustered ink skips.
-      final band = sin(a * 8 + seed * 0.013);
-      final spec = _seedNoise(seed * 131 + i * 7);
-      final ink = (band * 0.6 + spec * 0.7) > -0.5;
-      final x = cos(a), y = sin(a);
-      if (ink) {
-        if (!down) {
-          path.moveTo(x, y);
-          down = true;
-        } else {
-          path.lineTo(x, y);
-        }
-      } else {
-        down = false;
-      }
-    }
-    return path;
   }
 
   static TextPainter _buildEmojiPainter(String emoji, double r) {
@@ -1012,6 +1043,7 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
               imageVersion: _imageVersion,
               animFrom: _animFrom,
               animT: _animT,
+              grain: _grain,
             ),
           ),
         ),
@@ -1713,6 +1745,9 @@ class _GraphPainter extends CustomPainter {
   final Map<String, Offset> animFrom;
   /// Drives the recenter animation: 0 = old positions, 1 = new positions.
   final ValueNotifier<double> animT;
+  /// Seamless ink-grain texture used to give strokes a dry-brush look. May be
+  /// null for the first frame or two before it finishes generating.
+  final ui.Image? grain;
 
   // Cached paint objects — allocated once per painter, mutated per draw call.
   final _fillPaint = Paint();
@@ -1726,6 +1761,9 @@ class _GraphPainter extends CustomPainter {
     ..style = PaintingStyle.stroke
     ..strokeCap = StrokeCap.round
     ..strokeJoin = StrokeJoin.round;
+  // Punches the grain texture into a stroke layer (kept where grain is opaque).
+  final _grainPaint = Paint()..blendMode = BlendMode.dstIn;
+  final _layerPaint = Paint();
 
   // Cached paper + doodles picture, invalidated only when size changes.
   ui.Picture? _bgPicture;
@@ -1745,7 +1783,45 @@ class _GraphPainter extends CustomPainter {
     required this.imageVersion,
     required this.animFrom,
     required this.animT,
+    required this.grain,
   }) : super(repaint: Listenable.merge([view, animT]));
+
+  /// Runs [draw] (a batch of ink strokes) inside a layer, then masks the result
+  /// with the grain texture so the strokes only keep ink where the grain is
+  /// opaque — a real dry-brush (かすれ) texture. Falls back to a plain draw until
+  /// the grain image is ready. [bounds] is the visible region in painter space.
+  void _maskedStrokes(Canvas canvas, Rect bounds, VoidCallback draw) {
+    final g = grain;
+    if (g == null) {
+      draw();
+      return;
+    }
+    canvas.saveLayer(bounds, _layerPaint);
+    draw();
+    // Grain tiles in painter space (scales with zoom, like ink on the page).
+    final m = Matrix4.identity()..scaleByDouble(1.4, 1.4, 1.0, 1.0);
+    _grainPaint.shader = ui.ImageShader(
+        g, TileMode.repeated, TileMode.repeated, m.storage);
+    canvas.drawRect(bounds, _grainPaint);
+    canvas.restore();
+  }
+
+  /// Per-node ink opacity (matches the body pass so rings line up with fills).
+  double _nodeOpacity(_WorldNode node) {
+    if (useConcentricLayout && !is3D && node.ringDepth >= 0) {
+      final d = node.ringDepth;
+      if (d <= 1) return 1.0;
+      if (d == 2) return 0.50;
+      if (d == 3) return 0.24;
+      return 0.12;
+    }
+    final primary = _isPrimary(node.user);
+    final highlighted =
+        highlightedIds == null || highlightedIds!.contains(node.user.id);
+    if (!highlighted) return 0.18;
+    if (!primary) return 0.45;
+    return 1.0;
+  }
 
   bool _isPrimary(User u) {
     if (!fadeNonDirect) return true;
@@ -1815,34 +1891,43 @@ class _GraphPainter extends CustomPainter {
       }
     }
 
+    // Visible region in painter space — used as the grain-mask layer bounds.
+    final inv = 1.0 / view.scale;
+    final bounds = Rect.fromPoints(
+      Offset((0 - cx - view.pan.dx) * inv + cx, (0 - cy - view.pan.dy) * inv + cy),
+      Offset((size.width - cx - view.pan.dx) * inv + cx,
+          (size.height - cy - view.pan.dy) * inv + cy),
+    );
+
+    // ---- Edges: ink strokes, dry-brush textured as a batch ----
     if (showEdges) {
-      for (final e in worldEdges) {
-        if (e.fromIdx >= n || e.toIdx >= n) continue;
-        double alpha = e.opacity;
-        double width = e.thickness;
-        if (useConcentricLayout && !is3D) {
-          if (e.isPrimary) {
-            alpha = (e.opacity * 2.4).clamp(0.0, 0.82);
-            width = e.thickness * 1.7;
-          } else {
-            alpha = e.opacity * 0.20;
+      _maskedStrokes(canvas, bounds, () {
+        for (final e in worldEdges) {
+          if (e.fromIdx >= n || e.toIdx >= n) continue;
+          double alpha = e.opacity;
+          double width = e.thickness;
+          if (useConcentricLayout && !is3D) {
+            if (e.isPrimary) {
+              alpha = (e.opacity * 2.4).clamp(0.0, 0.82);
+              width = e.thickness * 1.7;
+            } else {
+              alpha = e.opacity * 0.20;
+            }
           }
+          // Width is comp-compensated so lines don't fatten on zoom.
+          _edgePaint
+            ..color = _kInk.withValues(alpha: (alpha * 1.5).clamp(0.0, 0.9))
+            ..strokeWidth = width * comp;
+          _drawSketchEdge(
+            canvas,
+            posList[e.fromIdx],
+            posList[e.toIdx],
+            _edgePaint,
+            e.fromIdx * 911 + e.toIdx,
+            dashed: e.dashed,
+          );
         }
-        // Ink pen lines on cream. Stronger ties read darker; weak ties are a
-        // light dotted pen trail. Width is comp-compensated so lines don't
-        // fatten as you zoom in (matching the held-constant node size).
-        _edgePaint
-          ..color = _kInk.withValues(alpha: (alpha * 1.4).clamp(0.0, 0.85))
-          ..strokeWidth = width * comp;
-        _drawSketchEdge(
-          canvas,
-          posList[e.fromIdx],
-          posList[e.toIdx],
-          _edgePaint,
-          e.fromIdx * 911 + e.toIdx,
-          dashed: e.dashed,
-        );
-      }
+      });
     }
 
     // Depth-sort indices (farther first) for 3D
@@ -1851,9 +1936,17 @@ class _GraphPainter extends CustomPainter {
     // Smaller z2 = closer (perspective scale s is larger) → draw last, on top.
     if (is3D) order.sort((a, b) => depths[b].compareTo(depths[a]));
 
+    // ---- Node bodies (fills, photo/emoji, label) — NOT grain-masked ----
     for (final i in order) {
-      _drawNode(canvas, worldNodes[i], posList[i], radList[i]);
+      _drawNodeBody(canvas, worldNodes[i], posList[i], radList[i]);
     }
+
+    // ---- Node pen rings — dry-brush textured as a batch, on top ----
+    _maskedStrokes(canvas, bounds, () {
+      for (final i in order) {
+        _drawNodeRings(canvas, worldNodes[i], posList[i], radList[i]);
+      }
+    });
 
     canvas.restore();
   }
@@ -1944,41 +2037,12 @@ class _GraphPainter extends CustomPainter {
     final path = ui.Path()
       ..moveTo(a.dx, a.dy)
       ..cubicTo(c1.dx, c1.dy, c2.dx, c2.dy, b.dx, b.dy);
-    final base = paint.color;
-    final baseA = base.a;
-    final baseW = paint.strokeWidth;
     if (!dashed) {
-      // Dry-brush (かすれ): a faint continuous underlay keeps the line whole,
-      // then a broken overlay walks the curve skipping ink here and there and
-      // varying its darkness, like a pen running a little dry.
-      paint
-        ..color = base.withValues(alpha: baseA * 0.4)
-        ..strokeWidth = baseW * 0.85;
+      // Plain stroke — the grain mask layer supplies the dry-brush texture.
       canvas.drawPath(path, paint);
-      int k = 0;
-      for (final metric in path.computeMetrics()) {
-        double dist = 0;
-        while (dist < metric.length) {
-          final seg = 6.0 + _seedNoise(seed * 17 + k * 5) * 2.0; // ~4–8px
-          final end = min(dist + seg, metric.length);
-          final nz = _seedNoise(seed * 7 + k * 13);
-          if (nz > -0.35) {
-            paint
-              ..color = base.withValues(
-                  alpha: (baseA * (0.55 + 0.45 * ((nz + 1) / 2))).clamp(0.0, 1.0))
-              ..strokeWidth = baseW;
-            canvas.drawPath(metric.extractPath(dist, end), paint);
-          }
-          dist = end;
-          k++;
-        }
-      }
-      paint
-        ..color = base
-        ..strokeWidth = baseW;
       return;
     }
-    // Weak ties: hand-drawn dotted/dashed trail (already broken → reads dry).
+    // Weak ties: hand-drawn dotted/dashed trail.
     const dash = 5.0, gapLen = 4.5;
     for (final metric in path.computeMetrics()) {
       double dist = 0;
@@ -1990,7 +2054,10 @@ class _GraphPainter extends CustomPainter {
     }
   }
 
-  void _drawNode(Canvas canvas, _WorldNode node, Offset pos, double r) {
+  /// Draws everything for a node EXCEPT its pen rings: glow, opaque backing,
+  /// pastel wash, the photo/emoji, and the name label. Rings are drawn later in
+  /// a separate grain-masked batch so the dry-brush texture only hits the ink.
+  void _drawNodeBody(Canvas canvas, _WorldNode node, Offset pos, double r) {
     final isSelf = node.user.id == 'self';
 
     Color fill;
@@ -2038,10 +2105,6 @@ class _GraphPainter extends CustomPainter {
       showGlow = primary && highlighted;
     }
 
-    // Every node ring uses the same near-black indigo pen line — unified ink.
-    // Each node's identity comes from its pastel disc wash, not the outline.
-    const ink = _kInkLine;
-
     // The icon disc sits inside the outer ring with a clear gap between the two
     // pen circles, giving the "double circle" look.
     final gap = (r * 0.24).clamp(3.0, 7.0);
@@ -2084,14 +2147,6 @@ class _GraphPainter extends CustomPainter {
       }
     }
 
-    // ---- Inner pen ring hugging the icon disc (circle #1) ----
-    _drawPenRing(canvas, pos, rIcon, node.scratchInner, ink, isSelf ? 1.9 : 1.4,
-        0.8 * globalOpacity);
-
-    // ---- Outer pen ring — the encircle (circle #2) ----
-    _drawPenRing(canvas, pos, r, node.scratchOuter, ink, isSelf ? 2.4 : 1.9,
-        globalOpacity);
-
     if (!detailed) return;
 
     // Name label below the outer ring. The painter is a fixed layout-time size,
@@ -2108,27 +2163,28 @@ class _GraphPainter extends CustomPainter {
     }
   }
 
-  /// Strokes a perfectly-round pen ring with a dry-brush (かすれ) texture: a very
-  /// faint continuous underlay keeps the circle reading as whole, while the
-  /// seeded broken [scratchUnit] path on top supplies the starved-ink skips.
-  /// Stroke width is comp-compensated so it stays constant on zoom.
-  void _drawPenRing(Canvas canvas, Offset pos, double radius, ui.Path scratchUnit,
-      Color ink, double widthPx, double opacity) {
+  /// Draws a node's double pen ring as two clean comp-width circles. Texture is
+  /// not added here — these are drawn inside the grain-masked batch in paint(),
+  /// which punches the dry-brush かすれ into them. Unified near-black indigo ink.
+  void _drawNodeRings(Canvas canvas, _WorldNode node, Offset pos, double r) {
+    final opacity = _nodeOpacity(node);
+    if (opacity <= 0.001) return;
+    final isSelf = node.user.id == 'self';
     final comp = (1.0 / view.scale).clamp(0.45, 1.7);
-    // Faint continuous base — so the ring never looks merely dashed.
+    final gap = (r * 0.24).clamp(3.0, 7.0);
+    final rIcon = (r - gap).clamp(r * 0.5, r);
+
+    // Inner ring (hugs the icon disc).
     _rimPaint
-      ..color = ink.withValues(alpha: (0.30 * opacity).clamp(0.0, 1.0))
-      ..strokeWidth = widthPx * comp * 0.85;
-    canvas.drawCircle(pos, radius, _rimPaint);
-    // Broken dry-brush overlay (true circle, just skipping ink here and there).
-    canvas.save();
-    canvas.translate(pos.dx, pos.dy);
-    canvas.scale(radius);
+      ..color = _kInkLine.withValues(alpha: (0.85 * opacity).clamp(0.0, 1.0))
+      ..strokeWidth = (isSelf ? 1.9 : 1.4) * comp;
+    canvas.drawCircle(pos, rIcon, _rimPaint);
+
+    // Outer ring (the encircle).
     _rimPaint
-      ..color = ink.withValues(alpha: (0.95 * opacity).clamp(0.0, 1.0))
-      ..strokeWidth = (widthPx * comp) / radius;
-    canvas.drawPath(scratchUnit, _rimPaint);
-    canvas.restore();
+      ..color = _kInkLine.withValues(alpha: (0.95 * opacity).clamp(0.0, 1.0))
+      ..strokeWidth = (isSelf ? 2.4 : 1.9) * comp;
+    canvas.drawCircle(pos, r, _rimPaint);
   }
 
   void _drawProfileImage(
@@ -2165,5 +2221,6 @@ class _GraphPainter extends CustomPainter {
       old.fadeNonDirect != fadeNonDirect ||
       old.highlightedIds != highlightedIds ||
       old.showEdges != showEdges ||
+      old.grain != grain ||
       old.imageVersion != imageVersion;
 }
