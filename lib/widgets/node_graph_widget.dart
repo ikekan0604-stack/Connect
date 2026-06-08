@@ -35,9 +35,11 @@ class _WorldNode {
   // Pre-built at layout time — never recreated during rotation
   final TextPainter emojiPainter;
   final TextPainter? namePainter; // null when baseRadius < 11
-  /// Tiny per-node seed used to give the (true-circle) pen rings a stable,
-  /// barely-there offset so they read as hand-drawn rather than vector-perfect.
-  final int penSeed;
+  /// "Dry-brush" unit circles (radius ~1): perfectly round but broken into
+  /// seeded ink/skip runs so the stroke reads like a real, slightly-starved pen
+  /// line instead of a clean vector ring. One for each ring of the double circle.
+  final ui.Path scratchInner;
+  final ui.Path scratchOuter;
 
   _WorldNode({
     required this.user,
@@ -48,7 +50,8 @@ class _WorldNode {
     this.ringDepth = -1,
     required this.emojiPainter,
     this.namePainter,
-    required this.penSeed,
+    required this.scratchInner,
+    required this.scratchOuter,
   });
 
   void dispose() {
@@ -605,7 +608,8 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
         ringDepth: ringDepths[i],
         emojiPainter: _buildEmojiPainter(u.emoji, r),
         namePainter: r >= 11 ? _buildNamePainter(u.name, r) : null,
-        penSeed: u.id.hashCode,
+        scratchInner: _buildScratchyUnitCircle(u.id.hashCode),
+        scratchOuter: _buildScratchyUnitCircle(u.id.hashCode ^ 0x5bd1e995),
       ));
     }
 
@@ -694,6 +698,35 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
     } catch (_) {
       // silently ignore — node shows kanji/emoji fallback
     }
+  }
+
+  /// Builds a perfectly round unit circle (radius ≈ 1) whose outline is broken
+  /// into seeded ink/skip runs — a "dry-brush" pen line. The geometry stays a
+  /// true circle (cos/sin at radius 1, no wobble); only the ink coverage varies,
+  /// giving the かすれ texture without any jaggedness. Deterministic per [seed].
+  static ui.Path _buildScratchyUnitCircle(int seed) {
+    const n = 144;
+    final path = ui.Path();
+    bool down = false;
+    for (int i = 0; i <= n; i++) {
+      final a = (i / n) * 2 * pi;
+      // Low-frequency "dryness" bands + fine speckle → clustered ink skips.
+      final band = sin(a * 8 + seed * 0.013);
+      final spec = _seedNoise(seed * 131 + i * 7);
+      final ink = (band * 0.6 + spec * 0.7) > -0.5;
+      final x = cos(a), y = sin(a);
+      if (ink) {
+        if (!down) {
+          path.moveTo(x, y);
+          down = true;
+        } else {
+          path.lineTo(x, y);
+        }
+      } else {
+        down = false;
+      }
+    }
+    return path;
   }
 
   static TextPainter _buildEmojiPainter(String emoji, double r) {
@@ -1848,10 +1881,10 @@ class _GraphPainter extends CustomPainter {
       // Faint bullet-journal dot grid for that notebook-page feel. This stays
       // fixed to the page — the inked drawing (doodles + nodes) moves over it.
       const gap = 26.0;
-      final dotPaint = Paint()..color = _kInk.withValues(alpha: 0.05);
+      final dotPaint = Paint()..color = _kInk.withValues(alpha: 0.09);
       for (double y = gap; y < size.height; y += gap) {
         for (double x = gap; x < size.width; x += gap) {
-          c.drawCircle(Offset(x, y), 0.9, dotPaint);
+          c.drawCircle(Offset(x, y), 1.0, dotPaint);
         }
       }
 
@@ -1911,11 +1944,41 @@ class _GraphPainter extends CustomPainter {
     final path = ui.Path()
       ..moveTo(a.dx, a.dy)
       ..cubicTo(c1.dx, c1.dy, c2.dx, c2.dy, b.dx, b.dy);
+    final base = paint.color;
+    final baseA = base.a;
+    final baseW = paint.strokeWidth;
     if (!dashed) {
+      // Dry-brush (かすれ): a faint continuous underlay keeps the line whole,
+      // then a broken overlay walks the curve skipping ink here and there and
+      // varying its darkness, like a pen running a little dry.
+      paint
+        ..color = base.withValues(alpha: baseA * 0.4)
+        ..strokeWidth = baseW * 0.85;
       canvas.drawPath(path, paint);
+      int k = 0;
+      for (final metric in path.computeMetrics()) {
+        double dist = 0;
+        while (dist < metric.length) {
+          final seg = 6.0 + _seedNoise(seed * 17 + k * 5) * 2.0; // ~4–8px
+          final end = min(dist + seg, metric.length);
+          final nz = _seedNoise(seed * 7 + k * 13);
+          if (nz > -0.35) {
+            paint
+              ..color = base.withValues(
+                  alpha: (baseA * (0.55 + 0.45 * ((nz + 1) / 2))).clamp(0.0, 1.0))
+              ..strokeWidth = baseW;
+            canvas.drawPath(metric.extractPath(dist, end), paint);
+          }
+          dist = end;
+          k++;
+        }
+      }
+      paint
+        ..color = base
+        ..strokeWidth = baseW;
       return;
     }
-    // Walk the curve and stamp dashes with small gaps for a dotted-pen look.
+    // Weak ties: hand-drawn dotted/dashed trail (already broken → reads dry).
     const dash = 5.0, gapLen = 4.5;
     for (final metric in path.computeMetrics()) {
       double dist = 0;
@@ -2022,13 +2085,12 @@ class _GraphPainter extends CustomPainter {
     }
 
     // ---- Inner pen ring hugging the icon disc (circle #1) ----
-    _drawPenRing(canvas, pos, rIcon, ink, isSelf ? 1.9 : 1.4,
-        0.8 * globalOpacity, node.penSeed);
+    _drawPenRing(canvas, pos, rIcon, node.scratchInner, ink, isSelf ? 1.9 : 1.4,
+        0.8 * globalOpacity);
 
-    // ---- Outer pen ring with a doubled pass — the encircle (circle #2) ----
-    _drawPenRing(canvas, pos, r, ink, isSelf ? 2.4 : 1.9, globalOpacity,
-        node.penSeed ^ 0x9e3779b9,
-        doubled: true);
+    // ---- Outer pen ring — the encircle (circle #2) ----
+    _drawPenRing(canvas, pos, r, node.scratchOuter, ink, isSelf ? 2.4 : 1.9,
+        globalOpacity);
 
     if (!detailed) return;
 
@@ -2046,29 +2108,27 @@ class _GraphPainter extends CustomPainter {
     }
   }
 
-  /// Strokes a clean true-circle pen ring with a pen-like texture. The circle
-  /// itself is perfectly round; the hand-drawn feel comes from rounded caps and,
-  /// when [doubled] is set, a faint second pass nudged a sub-pixel amount (seeded
-  /// by [seed]) that mimics a biro re-trace — no jagged vertices.
-  void _drawPenRing(Canvas canvas, Offset pos, double radius, Color ink,
-      double widthPx, double opacity, int seed,
-      {bool doubled = false}) {
-    // The whole canvas is scaled by view.scale, which would otherwise fatten the
-    // stroke on zoom-in. Multiply by the same `comp` factor the node radius uses
-    // so the on-screen pen width tracks the (held-constant) node size.
+  /// Strokes a perfectly-round pen ring with a dry-brush (かすれ) texture: a very
+  /// faint continuous underlay keeps the circle reading as whole, while the
+  /// seeded broken [scratchUnit] path on top supplies the starved-ink skips.
+  /// Stroke width is comp-compensated so it stays constant on zoom.
+  void _drawPenRing(Canvas canvas, Offset pos, double radius, ui.Path scratchUnit,
+      Color ink, double widthPx, double opacity) {
     final comp = (1.0 / view.scale).clamp(0.45, 1.7);
+    // Faint continuous base — so the ring never looks merely dashed.
+    _rimPaint
+      ..color = ink.withValues(alpha: (0.30 * opacity).clamp(0.0, 1.0))
+      ..strokeWidth = widthPx * comp * 0.85;
+    canvas.drawCircle(pos, radius, _rimPaint);
+    // Broken dry-brush overlay (true circle, just skipping ink here and there).
+    canvas.save();
+    canvas.translate(pos.dx, pos.dy);
+    canvas.scale(radius);
     _rimPaint
       ..color = ink.withValues(alpha: (0.95 * opacity).clamp(0.0, 1.0))
-      ..strokeWidth = widthPx * comp;
-    canvas.drawCircle(pos, radius, _rimPaint);
-    if (doubled) {
-      final ox = _seedNoise(seed) * 0.7 * comp;
-      final oy = _seedNoise(seed * 7 + 3) * 0.7 * comp;
-      _rimPaint
-        ..color = ink.withValues(alpha: (0.45 * opacity).clamp(0.0, 1.0))
-        ..strokeWidth = widthPx * 0.7 * comp;
-      canvas.drawCircle(pos.translate(ox, oy), radius, _rimPaint);
-    }
+      ..strokeWidth = (widthPx * comp) / radius;
+    canvas.drawPath(scratchUnit, _rimPaint);
+    canvas.restore();
   }
 
   void _drawProfileImage(
