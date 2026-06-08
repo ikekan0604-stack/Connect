@@ -233,10 +233,6 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
   /// Eased animation progress exposed to the painter via ValueNotifier.
   final ValueNotifier<double> _animT = ValueNotifier(1.0);
 
-  // Procedurally-generated seamless ink-grain texture, used to give pen strokes
-  // a real dry-brush (かすれ) texture instead of faking it with vector tricks.
-  ui.Image? _grain;
-
   // Listener-based gesture state (avoids gesture arena — fixes Flutter web button taps)
   final Map<int, Offset> _pointers = {};
   Offset? _prevFocal;
@@ -253,7 +249,6 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
   void initState() {
     super.initState();
     _doodles = _generateDoodles(46);
-    _generateGrain();
     PaintingBinding.instance.systemFonts.addListener(_onFontsLoaded);
 
     _animCtrl = AnimationController(
@@ -277,72 +272,8 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
     for (final img in _profileImages.values) {
       img.dispose();
     }
-    _grain?.dispose();
     _view.dispose();
     super.dispose();
-  }
-
-  // ---------------- Ink-grain texture ----------------
-
-  /// Builds a small SEAMLESS ink-grain image (white RGB, varying alpha) from a
-  /// few octaves of tileable value noise. Used as a `BlendMode.dstIn` mask so
-  /// pen strokes keep their ink only where the grain is opaque — a real
-  /// dry-brush texture rather than a vector approximation.
-  void _generateGrain() {
-    const size = 96;
-    final rng = Random(99);
-
-    List<double> lattice(int cells) =>
-        List<double>.generate(cells * cells, (_) => rng.nextDouble());
-
-    double sample(List<double> lat, int cells, double u, double w) {
-      final fx = u * cells, fy = w * cells;
-      final x0 = fx.floor() % cells, y0 = fy.floor() % cells;
-      final x1 = (x0 + 1) % cells, y1 = (y0 + 1) % cells;
-      final tx = fx - fx.floor(), ty = fy - fy.floor();
-      final sx = tx * tx * (3 - 2 * tx);
-      final sy = ty * ty * (3 - 2 * ty);
-      final a = lat[y0 * cells + x0], b = lat[y0 * cells + x1];
-      final c = lat[y1 * cells + x0], d = lat[y1 * cells + x1];
-      final top = a + (b - a) * sx;
-      final bot = c + (d - c) * sx;
-      return top + (bot - top) * sy;
-    }
-
-    final lat1 = lattice(8); // broad dry streaks
-    final lat2 = lattice(16); // mid clumps
-    final lat3 = lattice(32); // fine grain
-    final pixels = Uint8List(size * size * 4);
-    for (int y = 0; y < size; y++) {
-      for (int x = 0; x < size; x++) {
-        final u = x / size, w = y / size;
-        final v = sample(lat1, 8, u, w) * 0.5 +
-            sample(lat2, 16, u, w) * 0.32 +
-            sample(lat3, 32, u, w) * 0.18;
-        // Map noise → ink-keep alpha: dry holes where low, full ink where high.
-        // A 0.12 floor keeps a faint ghost so lines never fully vanish.
-        double a = ((v - 0.34) / 0.40).clamp(0.0, 1.0);
-        a = a * 0.88 + 0.12;
-        final idx = (y * size + x) * 4;
-        pixels[idx] = 255;
-        pixels[idx + 1] = 255;
-        pixels[idx + 2] = 255;
-        pixels[idx + 3] = (a * 255).round();
-      }
-    }
-    ui.decodeImageFromPixels(
-      pixels,
-      size,
-      size,
-      ui.PixelFormat.rgba8888,
-      (img) {
-        if (mounted) {
-          setState(() => _grain = img);
-        } else {
-          img.dispose();
-        }
-      },
-    );
   }
 
   void _onFontsLoaded() {
@@ -1043,7 +974,6 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
               imageVersion: _imageVersion,
               animFrom: _animFrom,
               animT: _animT,
-              grain: _grain,
             ),
           ),
         ),
@@ -1745,9 +1675,6 @@ class _GraphPainter extends CustomPainter {
   final Map<String, Offset> animFrom;
   /// Drives the recenter animation: 0 = old positions, 1 = new positions.
   final ValueNotifier<double> animT;
-  /// Seamless ink-grain texture used to give strokes a dry-brush look. May be
-  /// null for the first frame or two before it finishes generating.
-  final ui.Image? grain;
 
   // Cached paint objects — allocated once per painter, mutated per draw call.
   final _fillPaint = Paint();
@@ -1761,11 +1688,12 @@ class _GraphPainter extends CustomPainter {
     ..style = PaintingStyle.stroke
     ..strokeCap = StrokeCap.round
     ..strokeJoin = StrokeJoin.round;
-  // Punches the grain texture into a stroke layer (kept where grain is opaque).
-  final _grainPaint = Paint()..blendMode = BlendMode.dstIn;
-  final _layerPaint = Paint();
+  // Faint ink dot for the notebook grid (drawn in world space so it pans/zooms).
+  final _gridPaint = Paint()
+    ..color = _kInk.withValues(alpha: 0.09)
+    ..strokeCap = StrokeCap.round;
 
-  // Cached paper + doodles picture, invalidated only when size changes.
+  // Cached paper picture, invalidated only when size changes.
   ui.Picture? _bgPicture;
   Size _bgPictureSize = Size.zero;
 
@@ -1783,28 +1711,7 @@ class _GraphPainter extends CustomPainter {
     required this.imageVersion,
     required this.animFrom,
     required this.animT,
-    required this.grain,
   }) : super(repaint: Listenable.merge([view, animT]));
-
-  /// Runs [draw] (a batch of ink strokes) inside a layer, then masks the result
-  /// with the grain texture so the strokes only keep ink where the grain is
-  /// opaque — a real dry-brush (かすれ) texture. Falls back to a plain draw until
-  /// the grain image is ready. [bounds] is the visible region in painter space.
-  void _maskedStrokes(Canvas canvas, Rect bounds, VoidCallback draw) {
-    final g = grain;
-    if (g == null) {
-      draw();
-      return;
-    }
-    canvas.saveLayer(bounds, _layerPaint);
-    draw();
-    // Grain tiles in painter space (scales with zoom, like ink on the page).
-    final m = Matrix4.identity()..scaleByDouble(1.4, 1.4, 1.0, 1.0);
-    _grainPaint.shader = ui.ImageShader(
-        g, TileMode.repeated, TileMode.repeated, m.storage);
-    canvas.drawRect(bounds, _grainPaint);
-    canvas.restore();
-  }
 
   /// Per-node ink opacity (matches the body pass so rings line up with fills).
   double _nodeOpacity(_WorldNode node) {
@@ -1840,8 +1747,17 @@ class _GraphPainter extends CustomPainter {
     canvas.scale(view.scale);
     canvas.translate(-cx, -cy);
 
-    // Pen doodles live on the same drawing plane as the nodes (world space),
-    // so they pan/zoom with the graph and sit behind the edges and nodes.
+    // Visible region in painter space (used by the dot grid).
+    final inv = 1.0 / view.scale;
+    final bounds = Rect.fromPoints(
+      Offset((0 - cx - view.pan.dx) * inv + cx, (0 - cy - view.pan.dy) * inv + cy),
+      Offset((size.width - cx - view.pan.dx) * inv + cx,
+          (size.height - cy - view.pan.dy) * inv + cy),
+    );
+
+    // Notebook dot grid + pen doodles live on the same drawing plane as the
+    // nodes (world space), so they pan/zoom with the graph.
+    _drawDotGrid(canvas, bounds);
     _drawDoodles(canvas, cx, cy);
 
     // Compute screen positions in painter-space (pre view-transform).
@@ -1891,43 +1807,33 @@ class _GraphPainter extends CustomPainter {
       }
     }
 
-    // Visible region in painter space — used as the grain-mask layer bounds.
-    final inv = 1.0 / view.scale;
-    final bounds = Rect.fromPoints(
-      Offset((0 - cx - view.pan.dx) * inv + cx, (0 - cy - view.pan.dy) * inv + cy),
-      Offset((size.width - cx - view.pan.dx) * inv + cx,
-          (size.height - cy - view.pan.dy) * inv + cy),
-    );
-
-    // ---- Edges: ink strokes, dry-brush textured as a batch ----
+    // ---- Edges: plain ink pen lines ----
     if (showEdges) {
-      _maskedStrokes(canvas, bounds, () {
-        for (final e in worldEdges) {
-          if (e.fromIdx >= n || e.toIdx >= n) continue;
-          double alpha = e.opacity;
-          double width = e.thickness;
-          if (useConcentricLayout && !is3D) {
-            if (e.isPrimary) {
-              alpha = (e.opacity * 2.4).clamp(0.0, 0.82);
-              width = e.thickness * 1.7;
-            } else {
-              alpha = e.opacity * 0.20;
-            }
+      for (final e in worldEdges) {
+        if (e.fromIdx >= n || e.toIdx >= n) continue;
+        double alpha = e.opacity;
+        double width = e.thickness;
+        if (useConcentricLayout && !is3D) {
+          if (e.isPrimary) {
+            alpha = (e.opacity * 2.4).clamp(0.0, 0.82);
+            width = e.thickness * 1.7;
+          } else {
+            alpha = e.opacity * 0.20;
           }
-          // Width is comp-compensated so lines don't fatten on zoom.
-          _edgePaint
-            ..color = _kInk.withValues(alpha: (alpha * 1.5).clamp(0.0, 0.9))
-            ..strokeWidth = width * comp;
-          _drawSketchEdge(
-            canvas,
-            posList[e.fromIdx],
-            posList[e.toIdx],
-            _edgePaint,
-            e.fromIdx * 911 + e.toIdx,
-            dashed: e.dashed,
-          );
         }
-      });
+        // Width is comp-compensated so lines don't fatten on zoom.
+        _edgePaint
+          ..color = _kInk.withValues(alpha: (alpha * 1.5).clamp(0.0, 0.9))
+          ..strokeWidth = width * comp;
+        _drawSketchEdge(
+          canvas,
+          posList[e.fromIdx],
+          posList[e.toIdx],
+          _edgePaint,
+          e.fromIdx * 911 + e.toIdx,
+          dashed: e.dashed,
+        );
+      }
     }
 
     // Depth-sort indices (farther first) for 3D
@@ -1936,24 +1842,18 @@ class _GraphPainter extends CustomPainter {
     // Smaller z2 = closer (perspective scale s is larger) → draw last, on top.
     if (is3D) order.sort((a, b) => depths[b].compareTo(depths[a]));
 
-    // ---- Node bodies (fills, photo/emoji, label) — NOT grain-masked ----
+    // ---- Nodes: body (fills/icon/label) then the double pen ring ----
     for (final i in order) {
       _drawNodeBody(canvas, worldNodes[i], posList[i], radList[i]);
+      _drawNodeRings(canvas, worldNodes[i], posList[i], radList[i]);
     }
-
-    // ---- Node pen rings — dry-brush textured as a batch, on top ----
-    _maskedStrokes(canvas, bounds, () {
-      for (final i in order) {
-        _drawNodeRings(canvas, worldNodes[i], posList[i], radList[i]);
-      }
-    });
 
     canvas.restore();
   }
 
-  /// Renders the cream sketchbook page — paper wash, a faint dot grid, and
-  /// scattered pen-drawn doodles — into a cached Picture. Only rebuilds when the
-  /// canvas size changes, so it costs nothing during pan / zoom / rotation.
+  /// Renders the cream sketchbook page wash into a cached Picture. The dot grid
+  /// and doodles are drawn separately in world space so they move with the
+  /// content; only this flat paper layer is cached (rebuilt on size change).
   void _drawPaper(Canvas canvas, Size size) {
     if (_bgPicture == null || _bgPictureSize != size) {
       final recorder = ui.PictureRecorder();
@@ -1971,20 +1871,29 @@ class _GraphPainter extends CustomPainter {
           ).createShader(full),
       );
 
-      // Faint bullet-journal dot grid for that notebook-page feel. This stays
-      // fixed to the page — the inked drawing (doodles + nodes) moves over it.
-      const gap = 26.0;
-      final dotPaint = Paint()..color = _kInk.withValues(alpha: 0.09);
-      for (double y = gap; y < size.height; y += gap) {
-        for (double x = gap; x < size.width; x += gap) {
-          c.drawCircle(Offset(x, y), 1.0, dotPaint);
-        }
-      }
-
       _bgPicture = recorder.endRecording();
       _bgPictureSize = size;
     }
     canvas.drawPicture(_bgPicture!);
+  }
+
+  /// Draws the faint notebook dot grid in WORLD space (called inside the view
+  /// transform) so the grid pans and zooms together with the drawing — the page
+  /// moves with the content rather than sitting under a sliding graph.
+  void _drawDotGrid(Canvas canvas, Rect bounds) {
+    const gap = 26.0;
+    // Snap the start to the grid so dots keep fixed world positions as we pan.
+    final startX = (bounds.left / gap).floorToDouble() * gap;
+    final startY = (bounds.top / gap).floorToDouble() * gap;
+    final points = <Offset>[];
+    for (double y = startY; y <= bounds.bottom; y += gap) {
+      for (double x = startX; x <= bounds.right; x += gap) {
+        points.add(Offset(x, y));
+      }
+    }
+    // One batched call; strokeWidth = dot diameter (round cap → round dots).
+    _gridPaint.strokeWidth = 2.0;
+    canvas.drawPoints(ui.PointMode.points, points, _gridPaint);
   }
 
   /// Draws the pen-ink margin doodles in WORLD space — called inside the view
@@ -2055,8 +1964,7 @@ class _GraphPainter extends CustomPainter {
   }
 
   /// Draws everything for a node EXCEPT its pen rings: glow, opaque backing,
-  /// pastel wash, the photo/emoji, and the name label. Rings are drawn later in
-  /// a separate grain-masked batch so the dry-brush texture only hits the ink.
+  /// pastel wash, the photo/emoji, and the name label.
   void _drawNodeBody(Canvas canvas, _WorldNode node, Offset pos, double r) {
     final isSelf = node.user.id == 'self';
 
@@ -2163,9 +2071,8 @@ class _GraphPainter extends CustomPainter {
     }
   }
 
-  /// Draws a node's double pen ring as two clean comp-width circles. Texture is
-  /// not added here — these are drawn inside the grain-masked batch in paint(),
-  /// which punches the dry-brush かすれ into them. Unified near-black indigo ink.
+  /// Draws a node's double pen ring as two clean comp-width circles in the
+  /// unified near-black indigo ink.
   void _drawNodeRings(Canvas canvas, _WorldNode node, Offset pos, double r) {
     final opacity = _nodeOpacity(node);
     if (opacity <= 0.001) return;
@@ -2221,6 +2128,5 @@ class _GraphPainter extends CustomPainter {
       old.fadeNonDirect != fadeNonDirect ||
       old.highlightedIds != highlightedIds ||
       old.showEdges != showEdges ||
-      old.grain != grain ||
       old.imageVersion != imageVersion;
 }
