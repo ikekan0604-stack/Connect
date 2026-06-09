@@ -7,21 +7,21 @@ import 'dart:html' as html;
 import 'package:flutter/material.dart';
 import '../models/user.dart';
 import '../models/connection.dart';
+import '../models/group.dart';
 import '../theme.dart';
 import '../color_profiles.dart';
+import '../app_state.dart';
 
 // ---------------- Data structs ----------------
 
-/// Pen-drawn background motif scattered across the sketchbook page.
 enum _DoodleKind { star, heart, rocket, sparkle, swirl, dot }
 
 class _Doodle {
   final _DoodleKind kind;
-  final Offset pos; // normalized 0..1 across the canvas
-  final double size; // px
-  final double rotation; // radians
+  final Offset pos;
+  final double size;
+  final double rotation;
   final double opacity;
-  /// Pre-built pen path in local space (roughly unit-sized, centred at origin).
   final ui.Path path;
   const _Doodle(
       this.kind, this.pos, this.size, this.rotation, this.opacity, this.path);
@@ -31,11 +31,9 @@ class _WorldNode {
   final User user;
   final double baseRadius;
   final double wx, wy, wz;
-  /// BFS ring depth from current center in concentric mode; -1 otherwise.
   final int ringDepth;
-  // Pre-built at layout time — never recreated during rotation
   final TextPainter emojiPainter;
-  final TextPainter? namePainter; // null when baseRadius < 11
+  final TextPainter? namePainter;
 
   _WorldNode({
     required this.user,
@@ -59,31 +57,21 @@ class _WorldEdge {
   final int toIdx;
   final double thickness;
   final double opacity;
-  /// True when both endpoints are in ring 0 or ring 1 (concentric mode).
   final bool isPrimary;
-  /// Weaker ties render as a hand-drawn dotted/dashed pen line.
   final bool dashed;
   const _WorldEdge(this.fromIdx, this.toIdx, this.thickness, this.opacity,
       {this.isPrimary = false, this.dashed = false});
 }
 
-// ---------------- View transform state (Listenable) ----------------
+// ---------------- View transform state ----------------
 
-/// Encapsulates pan / zoom / 3D rotation. The painter listens to this
-/// directly via `super(repaint:)` so we don't need `setState` on every
-/// gesture frame.
 class GraphViewState extends ChangeNotifier {
   Offset pan = Offset.zero;
   double scale = 1.0;
   double rotX = 0.18;
   double rotY = 0.0;
 
-  void update({
-    Offset? pan,
-    double? scale,
-    double? rotX,
-    double? rotY,
-  }) {
+  void update({Offset? pan, double? scale, double? rotX, double? rotY}) {
     if (pan != null) this.pan = pan;
     if (scale != null) this.scale = scale;
     if (rotX != null) this.rotX = rotX;
@@ -100,13 +88,8 @@ class GraphViewState extends ChangeNotifier {
   }
 }
 
-// ---------------- Sketchbook palette ----------------
-// Colours come from the active ColorProfile (see color_profiles.dart) so the
-// graph re-skins with the rest of the app. The painter holds a `palette` field;
-// the State's text-painter builders take the ink colour as a parameter.
+// ---------------- Helpers ----------------
 
-/// Deterministic pseudo-random noise in [-1, 1] from an integer seed.
-/// Classic GLSL-style hash — web-safe (no 64-bit int ops).
 double _seedNoise(int s) {
   final x = sin(s * 12.9898) * 43758.5453;
   return (x - x.floorToDouble()) * 2 - 1;
@@ -127,33 +110,28 @@ Color _desaturate(Color c, [double amount = 1.0]) {
 
 double _edgeOpacity(RelationshipLevel l) {
   switch (l) {
-    case RelationshipLevel.acquaintance:
-      return 0.08;
-    case RelationshipLevel.familiar:
-      return 0.16;
-    case RelationshipLevel.friend:
-      return 0.28;
-    case RelationshipLevel.closeFriend:
-      return 0.45;
-    case RelationshipLevel.bestFriend:
-      return 0.70;
+    case RelationshipLevel.acquaintance: return 0.08;
+    case RelationshipLevel.familiar:    return 0.16;
+    case RelationshipLevel.friend:      return 0.28;
+    case RelationshipLevel.closeFriend: return 0.45;
+    case RelationshipLevel.bestFriend:  return 0.70;
   }
 }
 
 double _edgeThickness(RelationshipLevel l) {
   switch (l) {
-    case RelationshipLevel.acquaintance:
-      return 0.6;
-    case RelationshipLevel.familiar:
-      return 1.1;
-    case RelationshipLevel.friend:
-      return 1.9;
-    case RelationshipLevel.closeFriend:
-      return 2.8;
-    case RelationshipLevel.bestFriend:
-      return 4.0;
+    case RelationshipLevel.acquaintance: return 0.6;
+    case RelationshipLevel.familiar:    return 1.1;
+    case RelationshipLevel.friend:      return 1.9;
+    case RelationshipLevel.closeFriend: return 2.8;
+    case RelationshipLevel.bestFriend:  return 4.0;
   }
 }
+
+// Sort mode: user must pinch below this scale AND hold for _kSortResistanceDuration
+const double _kSortResistanceStart = 0.26; // resistance arc starts here
+const double _kSortTriggerScale    = 0.18; // must stay below here for hold
+const double _kSortResistanceDuration = 0.75; // seconds to hold
 
 // ---------------- Widget ----------------
 
@@ -162,15 +140,22 @@ class NodeGraphWidget extends StatefulWidget {
   final List<User> users;
   final List<Connection> connections;
   final bool is3D;
-  /// When true, 2D layout uses concentric rings centered on the tapped node.
-  /// Home tab only — sort tab uses the default force-directed layout.
   final bool useConcentricLayout;
   final bool fadeNonDirect;
   final List<String>? highlightedIds;
   final bool showEdges;
   final RelationshipLevel? edgeLevelFilter;
+  // Callbacks
   final Function(User) onNodeLongPress;
+  final Function(User)? onNodeTap;
+  final Function(Set<String>)? onLassoComplete;
+  final Function(bool)? onSortModeChanged;
+  // Edit / visual modes
+  final bool editMode;
+  final bool sortMode;
+  final List<Group> groups;
   final int resetSignal;
+  final int relayoutSignal;
 
   const NodeGraphWidget({
     super.key,
@@ -184,7 +169,14 @@ class NodeGraphWidget extends StatefulWidget {
     this.showEdges = true,
     this.edgeLevelFilter,
     required this.onNodeLongPress,
+    this.onNodeTap,
+    this.onLassoComplete,
+    this.onSortModeChanged,
+    this.editMode = false,
+    this.sortMode = false,
+    this.groups = const [],
     this.resetSignal = 0,
+    this.relayoutSignal = 0,
   });
 
   @override
@@ -200,56 +192,63 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
   List<_WorldEdge> _worldEdges = const [];
 
   final GraphViewState _view = GraphViewState();
-
   Size _lastSize = Size.zero;
-
-  // Profile images loaded from network — keyed by user.id
   final Map<String, ui.Image> _profileImages = {};
   int _imageVersion = 0;
-
-  // ---- Concentric ring depths (populated by _buildLayout in concentric mode) ----
   final Map<String, int> _ringDepthById = {};
 
-  // ---- Center-change feature ----
-  /// Id of the user currently at the visual center of the 2D graph.
+  // Concentric recenter
   String _centerId = 'self';
-  /// Tracks the last center we built layout for (triggers rebuild on change).
   String _lastCenterId = 'self';
-  /// True while a center-change-triggered rebuild is pending.
   bool _animPending = false;
-  /// Previous 2D positions to interpolate FROM during the recenter animation.
   final Map<String, Offset> _animFrom = {};
-  /// Drives the recenter animation (0 → 1 = old positions → new positions).
   late AnimationController _animCtrl;
-  /// Eased animation progress exposed to the painter via ValueNotifier.
   final ValueNotifier<double> _animT = ValueNotifier(1.0);
 
-  // Listener-based gesture state (avoids gesture arena — fixes Flutter web button taps)
+  // Listener gesture state
   final Map<int, Offset> _pointers = {};
   Offset? _prevFocal;
   double? _prevDist;
   double _baseScale = 1.0;
 
-  // Manual long-press detection
+  // Long-press detection
   Timer? _longPressTimer;
   Offset? _longPressOrigin;
   static const _kLongPressDuration = Duration(milliseconds: 500);
   static const _kLongPressMoveSlop = 12.0;
+
+  // ---- Edit mode drag state ----
+  String? _draggingNodeId;
+  Offset? _dragStartScreenPos;
+  Offset? _dragStartWorldPos;
+  final Map<String, Offset> _nodePositionOverrides = {};
+
+  // ---- Lasso state ----
+  bool _isLasso = false;
+  final List<Offset> _lassoScreenPoints = [];
+
+  // ---- Sort mode resistance state ----
+  bool _sortResistanceActive = false;
+  double _sortResistanceProgress = 0.0;
+  Timer? _sortResistanceTimer;
+  DateTime? _sortResistanceStartTime;
+
+  // ---- Repaint extra trigger ----
+  final ValueNotifier<int> _overlayVersion = ValueNotifier(0);
 
   @override
   void initState() {
     super.initState();
     _doodles = _generateDoodles(46);
     PaintingBinding.instance.systemFonts.addListener(_onFontsLoaded);
-    // Rebuild cached ink-coloured text painters when the colour profile changes.
     activeProfileIndex.addListener(_onPaletteChanged);
+    decoStyleNotifier.addListener(_onDecoChanged);
 
     _animCtrl = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 600),
     );
     _animCtrl.addListener(() {
-      // Ease-out cubic: fast start, gentle landing.
       final t = _animCtrl.value;
       _animT.value = 1 - (1 - t) * (1 - t) * (1 - t);
     });
@@ -259,40 +258,37 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
   void dispose() {
     PaintingBinding.instance.systemFonts.removeListener(_onFontsLoaded);
     activeProfileIndex.removeListener(_onPaletteChanged);
+    decoStyleNotifier.removeListener(_onDecoChanged);
     _longPressTimer?.cancel();
+    _sortResistanceTimer?.cancel();
     _animCtrl.dispose();
     _animT.dispose();
+    _overlayVersion.dispose();
     _disposeNodeList(_worldNodes);
-    for (final img in _profileImages.values) {
-      img.dispose();
-    }
+    for (final img in _profileImages.values) img.dispose();
     _view.dispose();
     super.dispose();
   }
 
   void _onFontsLoaded() {
-    if (mounted && _lastSize != Size.zero) {
-      _buildLayout(_lastSize);
-    }
+    if (mounted && _lastSize != Size.zero) _buildLayout(_lastSize);
   }
 
   void _onPaletteChanged() {
-    // Re-bake the emoji / name text painters in the new ink colour, and repaint.
-    if (mounted && _lastSize != Size.zero) {
-      _buildLayout(_lastSize);
-    }
+    if (mounted && _lastSize != Size.zero) _buildLayout(_lastSize);
   }
 
-  // ---------------- Center-change (tap-to-recenter) ----------------
+  void _onDecoChanged() {
+    if (mounted) setState(() {});
+  }
 
-  /// Switch the visual center to [newId] and smoothly animate the graph.
+  // ---------------- Center-change ----------------
+
   void _setCenterId(String newId) {
     if (newId == _centerId) {
-      // Tapping the current center → return to self.
       if (_centerId == 'self') return;
       newId = 'self';
     }
-    // Snapshot current world positions as animation start.
     _animFrom.clear();
     for (final n in _worldNodes) {
       _animFrom[n.user.id] = Offset(n.wx, n.wy);
@@ -300,34 +296,30 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
     _animT.value = 0.0;
     _animCtrl.reset();
     _animPending = true;
-    setState(() {
-      _centerId = newId;
-    });
-    // _buildLayout will be scheduled in build() when _lastCenterId != _centerId.
+    setState(() => _centerId = newId);
   }
 
-  /// Single-tap handler: recenter in concentric 2D mode; no-op otherwise.
   void _handleTap(Offset pos) {
-    if (!widget.useConcentricLayout || widget.is3D) return;
     final hit = _hitTest(pos);
+    // Single tap → photo collage callback
+    if (widget.onNodeTap != null && hit != null && hit.user.id != 'self') {
+      widget.onNodeTap!(hit.user);
+      return;
+    }
+    if (!widget.useConcentricLayout || widget.is3D) return;
     if (hit == null) return;
     _setCenterId(hit.user.id);
   }
 
   void _disposeNodeList(List<_WorldNode> nodes) {
-    for (final n in nodes) {
-      n.dispose();
-    }
+    for (final n in nodes) n.dispose();
   }
 
-  /// Sig that, when changed, requires the heavy FR layout to re-run.
-  /// Filter / highlight changes are NOT included.
   String _computePositionSig() {
     final ids = widget.users.map((u) => u.id).join(',');
     return '${widget.is3D}|${widget.useConcentricLayout}|$ids|${widget.users.length}';
   }
 
-  /// Sig for edge list (cheap to recompute).
   String _computeEdgeSig() {
     return '${widget.showEdges}|${widget.edgeLevelFilter}|${widget.connections.length}';
   }
@@ -341,21 +333,24 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
     if (_lastSize != Size.zero) {
       final pSig = _computePositionSig();
       final eSig = _computeEdgeSig();
-      final needPositions = pSig != _lastPositionSig;
-      final needEdges = eSig != _lastEdgeSig;
-      if (needPositions) {
-        _buildLayout(_lastSize); // builds positions + edges
-      } else if (needEdges) {
+      if (pSig != _lastPositionSig) {
+        _buildLayout(_lastSize);
+      } else if (eSig != _lastEdgeSig) {
         _rebuildEdgesOnly();
       }
     }
     if (old.resetSignal != widget.resetSignal) {
       _view.reset();
+      _nodePositionOverrides.clear();
       if (widget.useConcentricLayout && _centerId != 'self') {
         setState(() => _centerId = 'self');
       }
     }
-    // Switching from 2D to 3D: reset pan so rotation pivots on screen centre.
+    if (old.relayoutSignal != widget.relayoutSignal) {
+      // Re-run layout without position overrides, using group constraints
+      _nodePositionOverrides.clear();
+      if (_lastSize != Size.zero) _buildLayout(_lastSize);
+    }
     if (!old.is3D && widget.is3D) {
       _view.update(pan: Offset.zero);
     }
@@ -363,33 +358,21 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
 
   void _rebuildEdgesOnly() {
     if (_worldNodes.isEmpty) return;
-    final idIdx = {
-      for (int i = 0; i < _worldNodes.length; i++) _worldNodes[i].user.id: i
-    };
+    final idIdx = {for (int i = 0; i < _worldNodes.length; i++) _worldNodes[i].user.id: i};
     final worldEdges = <_WorldEdge>[];
     if (widget.showEdges) {
       for (final c in widget.connections) {
-        if (widget.edgeLevelFilter != null &&
-            c.level != widget.edgeLevelFilter) {
-          continue;
-        }
+        if (widget.edgeLevelFilter != null && c.level != widget.edgeLevelFilter) continue;
         final a = idIdx[c.userId1];
         final b = idIdx[c.userId2];
         if (a == null || b == null) continue;
         final dA = _ringDepthById[c.userId1] ?? -1;
         final dB = _ringDepthById[c.userId2] ?? -1;
-        final isPrimary = widget.useConcentricLayout &&
-            dA >= 0 && dA <= 1 && dB >= 0 && dB <= 1;
-        worldEdges.add(_WorldEdge(
-          a,
-          b,
-          _edgeThickness(c.level),
-          _edgeOpacity(c.level),
-          isPrimary: isPrimary,
-          // Solid only for strong ties; weaker relationships stay dotted.
-          dashed: c.level != RelationshipLevel.closeFriend &&
-              c.level != RelationshipLevel.bestFriend,
-        ));
+        final isPrimary = widget.useConcentricLayout && dA >= 0 && dA <= 1 && dB >= 0 && dB <= 1;
+        worldEdges.add(_WorldEdge(a, b, _edgeThickness(c.level), _edgeOpacity(c.level),
+            isPrimary: isPrimary,
+            dashed: c.level != RelationshipLevel.closeFriend &&
+                c.level != RelationshipLevel.bestFriend));
       }
     }
     setState(() {
@@ -400,30 +383,23 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
 
   // ---------------- Background doodles ----------------
 
-  /// Scatters pen-drawn motifs (stars, hearts, rockets, sparkles, swirls, dots)
-  /// across the drawing plane like margin doodles in a sketchbook. Positions are
-  /// in WORLD space (relative to the graph centre) so the doodles pan and zoom
-  /// together with the nodes — the whole scene reads as one inked page.
-  /// Deterministic so the layout is stable across rebuilds.
   List<_Doodle> _generateDoodles(int count) {
     final rng = Random(7);
-    // Weighted kind pool — sparkles & dots are common, rockets rare.
     const pool = [
       _DoodleKind.sparkle, _DoodleKind.sparkle, _DoodleKind.dot,
       _DoodleKind.dot, _DoodleKind.star, _DoodleKind.star,
       _DoodleKind.heart, _DoodleKind.swirl, _DoodleKind.rocket,
     ];
-    // World half-extent the doodles spread across (a bit wider than the graph).
     const spread = 560.0;
     return List.generate(count, (_) {
       final kind = pool[rng.nextInt(pool.length)];
       final size = switch (kind) {
-        _DoodleKind.rocket => 30.0 + rng.nextDouble() * 16,
-        _DoodleKind.heart => 16.0 + rng.nextDouble() * 12,
-        _DoodleKind.star => 14.0 + rng.nextDouble() * 14,
-        _DoodleKind.swirl => 16.0 + rng.nextDouble() * 12,
-        _DoodleKind.sparkle => 9.0 + rng.nextDouble() * 12,
-        _DoodleKind.dot => 2.5 + rng.nextDouble() * 3,
+        _DoodleKind.rocket  => 30.0 + rng.nextDouble() * 16,
+        _DoodleKind.heart   => 16.0 + rng.nextDouble() * 12,
+        _DoodleKind.star    => 14.0 + rng.nextDouble() * 14,
+        _DoodleKind.swirl   => 16.0 + rng.nextDouble() * 12,
+        _DoodleKind.sparkle =>  9.0 + rng.nextDouble() * 12,
+        _DoodleKind.dot     =>  2.5 + rng.nextDouble() * 3,
       };
       return _Doodle(
         kind,
@@ -431,20 +407,16 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
             (rng.nextDouble() - 0.5) * 2 * spread),
         size,
         (rng.nextDouble() - 0.5) * 0.7,
-        // Larger motifs are drawn fainter so the page never feels busy.
         (kind == _DoodleKind.dot ? 0.18 : 0.11) + rng.nextDouble() * 0.05,
         _buildDoodlePath(kind, rng),
       );
     });
   }
 
-  /// Builds a pen-drawn motif path in local space, centred at origin, sized to
-  /// roughly fit within a unit box (scaled by [_Doodle.size] at draw time).
   static ui.Path _buildDoodlePath(_DoodleKind kind, Random rng) {
     final p = ui.Path();
     switch (kind) {
       case _DoodleKind.star:
-        // 5-point star outline with a touch of hand wobble.
         const points = 5;
         for (int i = 0; i <= points * 2; i++) {
           final isOuter = i.isEven;
@@ -456,32 +428,22 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
         p.close();
         break;
       case _DoodleKind.heart:
-        // Two lobes + point, traced with cubics.
         p.moveTo(0, 0.32);
         p.cubicTo(-0.55, -0.12, -0.32, -0.52, 0, -0.18);
         p.cubicTo(0.32, -0.52, 0.55, -0.12, 0, 0.32);
         p.close();
         break;
       case _DoodleKind.rocket:
-        // Body, nose, fins, and a little exhaust tick.
         p.moveTo(0, -0.5);
         p.cubicTo(0.26, -0.28, 0.26, 0.12, 0.14, 0.30);
         p.lineTo(-0.14, 0.30);
         p.cubicTo(-0.26, 0.12, -0.26, -0.28, 0, -0.5);
         p.close();
-        // left fin
-        p.moveTo(-0.14, 0.16);
-        p.lineTo(-0.34, 0.40);
-        p.lineTo(-0.12, 0.30);
-        // right fin
-        p.moveTo(0.14, 0.16);
-        p.lineTo(0.34, 0.40);
-        p.lineTo(0.12, 0.30);
-        // window
+        p.moveTo(-0.14, 0.16); p.lineTo(-0.34, 0.40); p.lineTo(-0.12, 0.30);
+        p.moveTo(0.14, 0.16);  p.lineTo(0.34, 0.40);  p.lineTo(0.12, 0.30);
         p.addOval(Rect.fromCircle(center: const Offset(0, -0.08), radius: 0.10));
         break;
       case _DoodleKind.sparkle:
-        // Four-point twinkle: concave diamond.
         const r = 0.5, w = 0.10;
         p.moveTo(0, -r);
         p.quadraticBezierTo(w, -w, r, 0);
@@ -491,7 +453,6 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
         p.close();
         break;
       case _DoodleKind.swirl:
-        // Open spiral.
         const turns = 1.6, steps = 26;
         for (int i = 0; i <= steps; i++) {
           final t = i / steps;
@@ -520,16 +481,12 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
     final n = ordered.length;
     if (n == 0) {
       final old = _worldNodes;
-      setState(() {
-        _worldNodes = const [];
-        _worldEdges = const [];
-      });
+      setState(() { _worldNodes = const []; _worldEdges = const []; });
       WidgetsBinding.instance.addPostFrameCallback((_) => _disposeNodeList(old));
       return;
     }
 
     final idIdx = {for (int i = 0; i < n; i++) ordered[i].id: i};
-    // Edges carry a spring-multiplier so closer relationships pull nodes together.
     final fEdges = <(int, int, double)>[];
     for (final c in widget.connections) {
       final a = idIdx[c.userId1];
@@ -538,50 +495,44 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
         fEdges.add((a, b, _springMult(c.level)));
       }
     }
+    // Virtual springs between group members: pull them together
+    for (final group in widget.groups) {
+      final memberIdxs = group.memberIds.map((id) => idIdx[id]).whereType<int>().toList();
+      for (int a = 0; a < memberIdxs.length; a++) {
+        for (int b = a + 1; b < memberIdxs.length; b++) {
+          fEdges.add((memberIdxs[a], memberIdxs[b], 3.0));
+        }
+      }
+    }
 
     final shortSide = max(min(size.width, size.height), 200.0);
-
     List<double> px, py, pz;
     List<int> ringDepths = List<int>.filled(n, -1);
 
     if (widget.is3D) {
-      final r = _FRLayout.compute3D(
-        n: n,
-        selfIdx: 0,
-        edges: fEdges,
-        shortSide: shortSide,
-      );
-      px = r.$1;
-      py = r.$2;
-      pz = r.$3;
+      final r = _FRLayout.compute3D(n: n, selfIdx: 0, edges: fEdges, shortSide: shortSide);
+      px = r.$1; py = r.$2; pz = r.$3;
     } else if (widget.useConcentricLayout) {
-      // Concentric/radial layout centred on _centerId — home tab only.
       final userIds = [for (final u in ordered) u.id];
       final r = _FRLayout.computeConcentric(
-        n: n,
-        userIds: userIds,
-        centerId: _centerId,
-        edges: fEdges,
-        shortSide: shortSide,
-      );
-      px = r.$1;
-      py = r.$2;
-      pz = List<double>.filled(n, 0);
+          n: n, userIds: userIds, centerId: _centerId, edges: fEdges, shortSide: shortSide);
+      px = r.$1; py = r.$2; pz = List<double>.filled(n, 0);
       ringDepths = r.$3;
     } else {
-      // Community-aware force-directed 2D layout — sort tab.
-      final r = _FRLayout.compute2DGrouped(
-        n: n,
-        selfIdx: 0,
-        edges: fEdges,
-        shortSide: shortSide,
-      );
-      px = r.$1;
-      py = r.$2;
-      pz = List<double>.filled(n, 0);
+      final r = _FRLayout.compute2DGrouped(n: n, selfIdx: 0, edges: fEdges, shortSide: shortSide);
+      px = r.$1; py = r.$2; pz = List<double>.filled(n, 0);
     }
 
-    // Update ring depth index for edge marking.
+    // Apply manual position overrides (from drag)
+    for (int i = 0; i < n; i++) {
+      final id = ordered[i].id;
+      final override = _nodePositionOverrides[id];
+      if (override != null) {
+        px[i] = override.dx;
+        py[i] = override.dy;
+      }
+    }
+
     _ringDepthById.clear();
     for (int i = 0; i < n; i++) {
       _ringDepthById[ordered[i].id] = ringDepths[i];
@@ -596,23 +547,17 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
       worldNodes.add(_WorldNode(
         user: u,
         baseRadius: r,
-        wx: px[i],
-        wy: py[i],
-        wz: pz[i],
+        wx: px[i], wy: py[i], wz: pz[i],
         ringDepth: ringDepths[i],
         emojiPainter: _buildEmojiPainter(u.emoji, r, activeProfile.ink),
-        namePainter:
-            r >= 11 ? _buildNamePainter(u.name, r, activeProfile.ink) : null,
+        namePainter: r >= 11 ? _buildNamePainter(u.name, r, activeProfile.ink) : null,
       ));
     }
 
     final worldEdges = <_WorldEdge>[];
     if (widget.showEdges) {
       for (final c in widget.connections) {
-        if (widget.edgeLevelFilter != null &&
-            c.level != widget.edgeLevelFilter) {
-          continue;
-        }
+        if (widget.edgeLevelFilter != null && c.level != widget.edgeLevelFilter) continue;
         final a = idIdx[c.userId1];
         final b = idIdx[c.userId2];
         if (a == null || b == null) continue;
@@ -620,31 +565,18 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
         final dB = ringDepths[b];
         final isPrimary = widget.useConcentricLayout &&
             dA >= 0 && dA <= 1 && dB >= 0 && dB <= 1;
-        worldEdges.add(_WorldEdge(
-          a,
-          b,
-          _edgeThickness(c.level),
-          _edgeOpacity(c.level),
-          isPrimary: isPrimary,
-          // Solid only for strong ties; weaker relationships stay dotted.
-          dashed: c.level != RelationshipLevel.closeFriend &&
-              c.level != RelationshipLevel.bestFriend,
-        ));
+        worldEdges.add(_WorldEdge(a, b, _edgeThickness(c.level), _edgeOpacity(c.level),
+            isPrimary: isPrimary,
+            dashed: c.level != RelationshipLevel.closeFriend &&
+                c.level != RelationshipLevel.bestFriend));
       }
     }
 
     final old = _worldNodes;
-    setState(() {
-      _worldNodes = worldNodes;
-      _worldEdges = worldEdges;
-    });
-    // Dispose after next frame so the old painter finishes its last draw.
+    setState(() { _worldNodes = worldNodes; _worldEdges = worldEdges; });
     WidgetsBinding.instance.addPostFrameCallback((_) => _disposeNodeList(old));
-
-    // Kick off network image loads for any nodes that have an imageUrl.
     _loadProfileImages(worldNodes);
 
-    // If this layout was triggered by a center change, start the position animation.
     if (_animPending) {
       _animPending = false;
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -659,27 +591,18 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
     for (final node in nodes) {
       final url = node.user.imageUrl;
       if (url == null || url.isEmpty) continue;
-      if (_profileImages.containsKey(node.user.id)) continue; // already loaded
+      if (_profileImages.containsKey(node.user.id)) continue;
       _loadNetworkImage(node.user.id, url);
     }
   }
 
   Future<void> _loadNetworkImage(String id, String url) async {
     try {
-      // Use dart:html XHR to fetch raw image bytes — more reliable than
-      // NetworkImage on Flutter web (CanvasKit) which can silently fail.
-      final request = await html.HttpRequest.request(
-        url,
-        responseType: 'arraybuffer',
-      ).timeout(const Duration(seconds: 15));
+      final request = await html.HttpRequest.request(url, responseType: 'arraybuffer')
+          .timeout(const Duration(seconds: 15));
       if (request.status != 200) return;
       final bytes = (request.response as ByteBuffer).asUint8List();
-      // Decode to ui.Image via Skia codec — produces a CanvasKit-native image.
-      final codec = await ui.instantiateImageCodec(
-        bytes,
-        targetWidth: 120,
-        targetHeight: 120,
-      );
+      final codec = await ui.instantiateImageCodec(bytes, targetWidth: 120, targetHeight: 120);
       final frame = await codec.getNextFrame();
       codec.dispose();
       if (mounted) {
@@ -688,37 +611,27 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
           _imageVersion++;
         });
       }
-    } catch (_) {
-      // silently ignore — node shows kanji/emoji fallback
-    }
+    } catch (_) {}
   }
 
   static TextPainter _buildEmojiPainter(String emoji, double r, Color ink) {
     return TextPainter(
-      text: TextSpan(
-        text: emoji,
-        style: TextStyle(
-          fontSize: r * 0.82,
-          color: ink,
-          fontFamily: AppTheme.bodyFamily,
-        ),
-      ),
+      text: TextSpan(text: emoji,
+          style: TextStyle(fontSize: r * 0.82, color: ink, fontFamily: AppTheme.bodyFamily)),
       textDirection: TextDirection.ltr,
     )..layout();
   }
 
   static TextPainter _buildNamePainter(String name, double r, Color ink) {
     return TextPainter(
-      text: TextSpan(
-        text: name,
-        style: TextStyle(
-          color: ink.withValues(alpha: 0.85),
-          fontSize: r < 16 ? 8.5 : 10,
-          fontWeight: FontWeight.w500,
-          letterSpacing: 0.2,
-          fontFamily: AppTheme.bodyFamily,
-        ),
-      ),
+      text: TextSpan(text: name,
+          style: TextStyle(
+            color: ink.withValues(alpha: 0.85),
+            fontSize: r < 16 ? 8.5 : 10,
+            fontWeight: FontWeight.w500,
+            letterSpacing: 0.2,
+            fontFamily: AppTheme.bodyFamily,
+          )),
       textDirection: TextDirection.ltr,
     )..layout();
   }
@@ -739,7 +652,6 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
     return 10;
   }
 
-  /// Node radius based on BFS ring depth in concentric layout.
   static double _radiusForRing(int depth) {
     if (depth <= 0) return 22;
     if (depth == 1) return 17;
@@ -760,76 +672,139 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
     if (size == Size.zero || _worldNodes.isEmpty) return null;
     final cx = size.width / 2;
     final cy = size.height / 2;
-
-    // Inverse view transform (canvas: translate(cx+pan), scale, translate(-cx))
-    final painterX =
-        (tapScreenPos.dx - cx - _view.pan.dx) / _view.scale + cx;
-    final painterY =
-        (tapScreenPos.dy - cy - _view.pan.dy) / _view.scale + cy;
+    final painterX = (tapScreenPos.dx - cx - _view.pan.dx) / _view.scale + cx;
+    final painterY = (tapScreenPos.dy - cy - _view.pan.dy) / _view.scale + cy;
     final painterPos = Offset(painterX, painterY);
 
     _WorldNode? best;
     double bestDist = double.infinity;
-
     final comp = (1.0 / _view.scale).clamp(0.45, 1.7);
 
     if (widget.is3D) {
       final cosX = cos(_view.rotX), sinX = sin(_view.rotX);
       final cosY = cos(_view.rotY), sinY = sin(_view.rotY);
       for (final n in _worldNodes) {
-        final x1 = n.wx * cosY + n.wz * sinY;
-        final z1 = -n.wx * sinY + n.wz * cosY;
-        final y2 = n.wy * cosX - z1 * sinX;
-        final z2 = n.wy * sinX + z1 * cosX;
+        final wx = _nodePositionOverrides[n.user.id]?.dx ?? n.wx;
+        final wy = _nodePositionOverrides[n.user.id]?.dy ?? n.wy;
+        final x1 = wx * cosY + n.wz * sinY;
+        final z1 = -wx * sinY + n.wz * cosY;
+        final y2 = wy * cosX - z1 * sinX;
+        final z2 = wy * sinX + z1 * cosX;
         final dz = max(z2 + _fov, 20.0);
         final s = _fov / dz;
         final nodePos = Offset(cx + x1 * s, cy + y2 * s);
         final nodeR = n.baseRadius * s.clamp(0.45, 1.5) * comp;
         final d = (painterPos - nodePos).distance;
         final hitR = nodeR + 14 / _view.scale;
-        if (d <= hitR && d < bestDist) {
-          best = n;
-          bestDist = d;
-        }
+        if (d <= hitR && d < bestDist) { best = n; bestDist = d; }
       }
     } else {
       for (final n in _worldNodes) {
-        final nodePos = Offset(cx + n.wx, cy + n.wy);
+        final wx = _nodePositionOverrides[n.user.id]?.dx ?? n.wx;
+        final wy = _nodePositionOverrides[n.user.id]?.dy ?? n.wy;
+        final nodePos = Offset(cx + wx, cy + wy);
         final d = (painterPos - nodePos).distance;
         final hitR = n.baseRadius * comp + 14 / _view.scale;
-        if (d <= hitR && d < bestDist) {
-          best = n;
-          bestDist = d;
-        }
+        if (d <= hitR && d < bestDist) { best = n; bestDist = d; }
       }
     }
     return best;
   }
 
-  // ---------------- Listener-based gestures ----------------
-  // Using Listener instead of GestureDetector so we never enter the gesture
-  // arena — this lets button taps in parent/sibling widgets work correctly
-  // on Flutter web (CanvasKit), where GestureDetector(onScale) would otherwise
-  // compete with and block all TapGestureRecognizers.
+  // ---------------- Lasso helpers ----------------
+
+  bool _isPointInPolygon(Offset point, List<Offset> polygon) {
+    int crossings = 0;
+    final n = polygon.length;
+    for (int i = 0; i < n; i++) {
+      final a = polygon[i];
+      final b = polygon[(i + 1) % n];
+      if ((a.dy > point.dy) != (b.dy > point.dy) &&
+          point.dx < (b.dx - a.dx) * (point.dy - a.dy) / (b.dy - a.dy) + a.dx) {
+        crossings++;
+      }
+    }
+    return crossings.isOdd;
+  }
+
+  void _finishLasso() {
+    if (_lassoScreenPoints.length < 4) return;
+    final size = _lastSize;
+    final cx = size.width / 2;
+    final cy = size.height / 2;
+    final enclosed = <String>{};
+    for (final node in _worldNodes) {
+      final wx = _nodePositionOverrides[node.user.id]?.dx ?? node.wx;
+      final wy = _nodePositionOverrides[node.user.id]?.dy ?? node.wy;
+      // Screen position of node
+      final sx = cx + _view.pan.dx + wx * _view.scale;
+      final sy = cy + _view.pan.dy + wy * _view.scale;
+      if (_isPointInPolygon(Offset(sx, sy), _lassoScreenPoints)) {
+        enclosed.add(node.user.id);
+      }
+    }
+    setState(() {
+      _isLasso = false;
+      _lassoScreenPoints.clear();
+    });
+    _overlayVersion.value++;
+    if (enclosed.length >= 2) {
+      widget.onLassoComplete?.call(enclosed);
+    }
+  }
+
+  // ---------------- Listener gestures ----------------
 
   void _handlePointerDown(PointerDownEvent e) {
     _pointers[e.pointer] = e.localPosition;
 
     if (_pointers.length == 1) {
-      // Start long-press timer
-      _longPressOrigin = e.localPosition;
-      _longPressTimer?.cancel();
-      _longPressTimer = Timer(_kLongPressDuration, () {
-        final pos = _longPressOrigin;
-        if (pos == null) return;
-        final hit = _hitTest(pos);
-        if (hit != null) widget.onNodeLongPress(hit.user);
-        _longPressOrigin = null;
-      });
+      if (widget.editMode && !widget.is3D) {
+        final hit = _hitTest(e.localPosition);
+        if (hit != null && hit.user.id != 'self') {
+          // Immediately start dragging the node
+          _draggingNodeId = hit.user.id;
+          _dragStartScreenPos = e.localPosition;
+          _dragStartWorldPos = _nodePositionOverrides[hit.user.id] ?? Offset(hit.wx, hit.wy);
+        } else {
+          // Empty space: allow pan on swipe, lasso on long-press
+          _longPressOrigin = e.localPosition;
+          _longPressTimer?.cancel();
+          _longPressTimer = Timer(_kLongPressDuration, () {
+            final pos = _longPressOrigin;
+            if (pos == null) return;
+            _longPressOrigin = null;
+            setState(() {
+              _isLasso = true;
+              _lassoScreenPoints.clear();
+              _lassoScreenPoints.add(pos);
+            });
+            _overlayVersion.value++;
+          });
+        }
+      } else {
+        // Normal mode: long press detection
+        _longPressOrigin = e.localPosition;
+        _longPressTimer?.cancel();
+        _longPressTimer = Timer(_kLongPressDuration, () {
+          final pos = _longPressOrigin;
+          if (pos == null) return;
+          final hit = _hitTest(pos);
+          if (hit != null) widget.onNodeLongPress(hit.user);
+          _longPressOrigin = null;
+        });
+      }
     } else {
-      // Multi-touch: cancel long press, snapshot scale
       _longPressTimer?.cancel();
       _longPressOrigin = null;
+      if (_isLasso) {
+        setState(() {
+          _isLasso = false;
+          _lassoScreenPoints.clear();
+        });
+        _overlayVersion.value++;
+      }
+      _draggingNodeId = null;
       _baseScale = _view.scale;
     }
 
@@ -845,6 +820,25 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
         (e.localPosition - _longPressOrigin!).distance > _kLongPressMoveSlop) {
       _longPressTimer?.cancel();
       _longPressOrigin = null;
+    }
+
+    // ---- Edit mode: drag node / lasso / pan ----
+    if (widget.editMode && !widget.is3D && _pointers.length == 1) {
+      if (_draggingNodeId != null) {
+        final delta = e.localPosition - _dragStartScreenPos!;
+        final worldDelta = Offset(delta.dx / _view.scale, delta.dy / _view.scale);
+        setState(() {
+          _nodePositionOverrides[_draggingNodeId!] = _dragStartWorldPos! + worldDelta;
+        });
+        _overlayVersion.value++;
+        return;
+      }
+      if (_isLasso) {
+        setState(() => _lassoScreenPoints.add(e.localPosition));
+        _overlayVersion.value++;
+        return;
+      }
+      // Empty space swipe = pan (fall through to normal pan logic below)
     }
 
     final focal = _focal();
@@ -869,22 +863,22 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
       final prev = _prevDist;
       double newScale = _view.scale;
       if (d != null && prev != null && prev > 0) {
-        newScale = (_view.scale * d / prev).clamp(0.3, 3.0);
+        newScale = (_view.scale * d / prev).clamp(0.10, 3.5);
       }
+      // Sort mode resistance: must hold below threshold for _kSortResistanceDuration
+      _updateSortResistance(newScale);
+      // Pinch-in to exit sort mode
+      if (widget.sortMode && newScale > _kSortResistanceStart * 1.4) {
+        widget.onSortModeChanged?.call(false);
+      }
+
       if (widget.is3D) {
-        // 3D: zoom toward screen centre (pivot = cx,cy) + allow two-finger pan.
-        // newPan = pan * ratio keeps screen-centre fixed; + delta adds finger translation.
         final ratio = newScale / _view.scale;
         _view.update(
           scale: newScale,
-          pan: Offset(
-            _view.pan.dx * ratio + delta.dx,
-            _view.pan.dy * ratio + delta.dy,
-          ),
+          pan: Offset(_view.pan.dx * ratio + delta.dx, _view.pan.dy * ratio + delta.dy),
         );
       } else {
-        // 2D: focal-centred zoom — the world point under the previous focal
-        // stays fixed at the new focal position after scale + finger translation.
         final prevFocal = _prevFocal!;
         final cx = _lastSize.width / 2;
         final cy = _lastSize.height / 2;
@@ -916,8 +910,30 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
       _longPressOrigin = null;
       _prevFocal = null;
       _prevDist = null;
-      // Single-pointer quick release with no movement → single tap
-      if (tap && wasSinglePointer && timerStillActive && origin != null) {
+
+      // Lasso completion
+      if (widget.editMode && _isLasso && _lassoScreenPoints.length > 3) {
+        _finishLasso();
+      }
+
+      // Reset drag state
+      if (_draggingNodeId != null) {
+        _draggingNodeId = null;
+        _dragStartScreenPos = null;
+        _dragStartWorldPos = null;
+      }
+
+      // Reset lasso state if not finishing
+      if (_isLasso && _lassoScreenPoints.length <= 3) {
+        setState(() {
+          _isLasso = false;
+          _lassoScreenPoints.clear();
+        });
+        _overlayVersion.value++;
+      }
+
+      // Single tap
+      if (tap && wasSinglePointer && timerStillActive && origin != null && !widget.editMode) {
         _handleTap(origin);
       }
     } else {
@@ -926,10 +942,46 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
     }
   }
 
+  void _updateSortResistance(double newScale) {
+    if (widget.sortMode) return;
+    if (newScale < _kSortTriggerScale) {
+      if (!_sortResistanceActive) {
+        _sortResistanceActive = true;
+        _sortResistanceStartTime = DateTime.now();
+        _sortResistanceProgress = 0.0;
+        _sortResistanceTimer?.cancel();
+        _sortResistanceTimer = Timer.periodic(
+          const Duration(milliseconds: 16),
+          (t) {
+            if (!mounted) { t.cancel(); return; }
+            final elapsed = DateTime.now()
+                .difference(_sortResistanceStartTime!)
+                .inMilliseconds;
+            final progress = (elapsed / (_kSortResistanceDuration * 1000)).clamp(0.0, 1.0);
+            setState(() => _sortResistanceProgress = progress);
+            _overlayVersion.value++;
+            if (progress >= 1.0) {
+              t.cancel();
+              _sortResistanceActive = false;
+              _sortResistanceProgress = 0.0;
+              widget.onSortModeChanged?.call(true);
+            }
+          },
+        );
+      }
+    } else {
+      if (_sortResistanceActive) {
+        _sortResistanceTimer?.cancel();
+        _sortResistanceActive = false;
+        setState(() => _sortResistanceProgress = 0.0);
+        _overlayVersion.value++;
+      }
+    }
+  }
+
   Offset? _focal() {
     if (_pointers.isEmpty) return null;
-    return _pointers.values.reduce((a, b) => a + b) /
-        _pointers.length.toDouble();
+    return _pointers.values.reduce((a, b) => a + b) / _pointers.length.toDouble();
   }
 
   double? _dist() {
@@ -960,23 +1012,33 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
         onPointerUp: _handlePointerUp,
         onPointerCancel: _handlePointerCancel,
         child: RepaintBoundary(
-          child: CustomPaint(
-            size: size,
-            painter: _GraphPainter(
-              doodles: _doodles,
-              worldNodes: _worldNodes,
-              worldEdges: _worldEdges,
-              is3D: widget.is3D,
-              useConcentricLayout: widget.useConcentricLayout,
-              fadeNonDirect: widget.fadeNonDirect,
-              highlightedIds: widget.highlightedIds,
-              showEdges: widget.showEdges,
-              view: _view,
-              profileImages: _profileImages,
-              imageVersion: _imageVersion,
-              animFrom: _animFrom,
-              animT: _animT,
-              palette: activeProfile,
+          child: ValueListenableBuilder<int>(
+            valueListenable: _overlayVersion,
+            builder: (_, __, ___) => CustomPaint(
+              size: size,
+              painter: _GraphPainter(
+                doodles: _doodles,
+                worldNodes: _worldNodes,
+                worldEdges: _worldEdges,
+                is3D: widget.is3D,
+                useConcentricLayout: widget.useConcentricLayout,
+                fadeNonDirect: widget.fadeNonDirect,
+                highlightedIds: widget.highlightedIds,
+                showEdges: widget.showEdges,
+                view: _view,
+                profileImages: _profileImages,
+                imageVersion: _imageVersion,
+                animFrom: _animFrom,
+                animT: _animT,
+                palette: activeProfile,
+                nodeOverrides: Map.unmodifiable(_nodePositionOverrides),
+                groups: widget.groups,
+                lassoPoints: List.unmodifiable(_lassoScreenPoints),
+                sortMode: widget.sortMode,
+                decoStyle: decoStyleNotifier.value,
+                editMode: widget.editMode,
+                sortResistanceProgress: _sortResistanceProgress,
+              ),
             ),
           ),
         ),
@@ -988,14 +1050,6 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
 // ---------------- Force-directed Layout ----------------
 
 class _FRLayout {
-  // ---- Concentric / radial layout (replaces FR for 2D) ----
-  //
-  // Runs BFS from [centerId], assigns each node to a ring, then places
-  // ring nodes evenly on circles.  Ring radii adapt to node count so
-  // nodes never crowd each other.
-  //
-  // edges: (fromIdx, toIdx, springMult) — mult is ignored here; only
-  // connectivity matters for BFS.
   static (List<double>, List<double>, List<int>) computeConcentric({
     required int n,
     required List<String> userIds,
@@ -1005,25 +1059,16 @@ class _FRLayout {
   }) {
     final px = List<double>.filled(n, 0.0);
     final py = List<double>.filled(n, 0.0);
-    final idToIdx = <String, int>{
-      for (int i = 0; i < n; i++) userIds[i]: i,
-    };
-
+    final idToIdx = <String, int>{for (int i = 0; i < n; i++) userIds[i]: i};
     final centerIdx = idToIdx[centerId] ?? 0;
 
-    // Build adjacency list.
     final adj = List<List<int>>.generate(n, (_) => <int>[]);
-    for (final (i, j, _) in edges) {
-      adj[i].add(j);
-      adj[j].add(i);
-    }
+    for (final (i, j, _) in edges) { adj[i].add(j); adj[j].add(i); }
 
-    // BFS from center → assign ring number + track BFS parent for angular clustering.
     final ringOf = List<int>.filled(n, -1);
     final parent = List<int>.filled(n, -1);
     ringOf[centerIdx] = 0;
     final queue = <int>[centerIdx];
-    // rings[k] = list of node indices at BFS depth k.
     final rings = <int, List<int>>{0: [centerIdx]};
 
     while (queue.isNotEmpty) {
@@ -1039,20 +1084,14 @@ class _FRLayout {
       }
     }
 
-    // Orphans (disconnected from center) go in the outermost ring.
     final isolated = <int>[];
-    for (int i = 0; i < n; i++) {
-      if (ringOf[i] == -1) isolated.add(i);
-    }
+    for (int i = 0; i < n; i++) { if (ringOf[i] == -1) isolated.add(i); }
     if (isolated.isNotEmpty) {
       final maxRing = rings.keys.reduce(max) + 1;
       rings[maxRing] = isolated;
-      for (final i in isolated) {
-        ringOf[i] = maxRing;
-      }
+      for (final i in isolated) ringOf[i] = maxRing;
     }
 
-    // ---- Place each ring concentrically with angular clustering ----
     const double ringGap = 108.0;
     const double nodeArcDirect = 58.0;
     const double nodeArcOther  = 44.0;
@@ -1061,22 +1100,16 @@ class _FRLayout {
     final sortedKeys = rings.keys.toList()..sort();
 
     for (final ring in sortedKeys) {
-      if (ring == 0) continue; // center stays at (0, 0)
+      if (ring == 0) continue;
       final nodes = rings[ring]!;
-
-      // Group by BFS parent so sibling sub-trees are placed adjacent on the arc.
       final byParent = <int, List<int>>{};
-      for (final idx in nodes) {
-        byParent.putIfAbsent(parent[idx], () => []).add(idx);
-      }
-      // Sort parent groups by the parent node's angular position in the previous ring.
+      for (final idx in nodes) byParent.putIfAbsent(parent[idx], () => []).add(idx);
       final parentKeys = byParent.keys.toList()
         ..sort((a, b) {
           if (a == -1) return 1;
           if (b == -1) return -1;
           return atan2(py[a], px[a]).compareTo(atan2(py[b], px[b]));
         });
-      // Within each parent group, order mutually connected nodes adjacently.
       final orderedNodes = <int>[];
       for (final p in parentKeys) {
         orderedNodes.addAll(_orderGroupByConnection(byParent[p]!, edges));
@@ -1091,32 +1124,18 @@ class _FRLayout {
         px[orderedNodes[i]] = radius * cos(angle);
         py[orderedNodes[i]] = radius * sin(angle);
       }
-
       prevRadius = radius;
     }
 
-    // ---- Post-process: push nodes away from edges they don't belong to ----
-    _separateNodesFromEdges(
-      n: n, px: px, py: py, edges: edges,
-      anchored: {centerIdx},
-      nodeRadius: 11.0, clearance: 8.0, passes: 60,
-    );
-
+    _separateNodesFromEdges(n: n, px: px, py: py, edges: edges,
+        anchored: {centerIdx}, nodeRadius: 11.0, clearance: 8.0, passes: 60);
     return (px, py, ringOf);
   }
 
-  /// Iteratively pushes each node away from edges it is not an endpoint of.
-  /// Nodes in [anchored] are never moved. [nodeRadius] and [clearance] define
-  /// the minimum distance between a node's surface and a passing edge.
   static void _separateNodesFromEdges({
-    required int n,
-    required List<double> px,
-    required List<double> py,
-    required List<(int, int, double)> edges,
-    required Set<int> anchored,
-    double nodeRadius = 14.0,
-    double clearance = 10.0,
-    int passes = 80,
+    required int n, required List<double> px, required List<double> py,
+    required List<(int, int, double)> edges, required Set<int> anchored,
+    double nodeRadius = 14.0, double clearance = 10.0, int passes = 80,
   }) {
     final minDist = nodeRadius + clearance;
     for (int pass = 0; pass < passes; pass++) {
@@ -1129,9 +1148,7 @@ class _FRLayout {
         final invLen2 = 1.0 / edgeLen2;
         for (int k = 0; k < n; k++) {
           if (k == ei || k == ej || anchored.contains(k)) continue;
-          // Parameter t = projection of node k onto the edge segment.
           final t = ((px[k] - ax) * (bx - ax) + (py[k] - ay) * (by - ay)) * invLen2;
-          // Skip near-endpoint region so we don't fight with adjacent nodes.
           if (t < 0.08 || t > 0.92) continue;
           final nearX = ax + t * (bx - ax);
           final nearY = ay + t * (by - ay);
@@ -1143,7 +1160,6 @@ class _FRLayout {
           final d = sqrt(d2);
           final push = (minDist - d) * 0.55;
           if (d < 0.5) {
-            // Node almost on edge: push perpendicular to edge direction.
             final invLen = 1.0 / sqrt(edgeLen2);
             px[k] += -(by - ay) * invLen * push;
             py[k] += (bx - ax) * invLen * push;
@@ -1157,31 +1173,23 @@ class _FRLayout {
     }
   }
 
-  /// Greedy nearest-neighbor ordering within a BFS ring group.
-  /// Nodes with stronger mutual connections end up placed adjacent to each other.
-  static List<int> _orderGroupByConnection(
-      List<int> group, List<(int, int, double)> edges) {
+  static List<int> _orderGroupByConnection(List<int> group, List<(int, int, double)> edges) {
     if (group.length <= 2) return List.from(group);
     final groupSet = group.toSet();
     final weights = <(int, int), double>{};
     for (final (a, b, w) in edges) {
       if (groupSet.contains(a) && groupSet.contains(b)) {
-        weights[(a, b)] = w;
-        weights[(b, a)] = w;
+        weights[(a, b)] = w; weights[(b, a)] = w;
       }
     }
     final result = <int>[group.first];
     final rem = group.sublist(1).toSet();
     while (rem.isNotEmpty) {
       final last = result.last;
-      int? best;
-      double bestW = -1;
+      int? best; double bestW = -1;
       for (final r in rem) {
         final w = weights[(last, r)] ?? 0.0;
-        if (w > bestW) {
-          bestW = w;
-          best = r;
-        }
+        if (w > bestW) { bestW = w; best = r; }
       }
       result.add(best ?? rem.first);
       rem.remove(result.last);
@@ -1189,11 +1197,8 @@ class _FRLayout {
     return result;
   }
 
-  /// Label propagation community detection. Returns 0-based community index per node.
   static List<int> _detectCommunities({
-    required int n,
-    required List<(int, int, double)> edges,
-    int iterations = 20,
+    required int n, required List<(int, int, double)> edges, int iterations = 20,
   }) {
     final rng = Random(42);
     final labels = List<int>.generate(n, (i) => i);
@@ -1203,19 +1208,12 @@ class _FRLayout {
       for (final i in order) {
         final votes = <int, double>{};
         for (final (a, b, w) in edges) {
-          if (a == i) {
-            votes.update(labels[b], (v) => v + w, ifAbsent: () => w);
-          } else if (b == i) {
-            votes.update(labels[a], (v) => v + w, ifAbsent: () => w);
-          }
+          if (a == i) votes.update(labels[b], (v) => v + w, ifAbsent: () => w);
+          else if (b == i) votes.update(labels[a], (v) => v + w, ifAbsent: () => w);
         }
         if (votes.isEmpty) continue;
-        final best =
-            votes.entries.reduce((x, y) => x.value >= y.value ? x : y).key;
-        if (best != labels[i]) {
-          labels[i] = best;
-          changed = true;
-        }
+        final best = votes.entries.reduce((x, y) => x.value >= y.value ? x : y).key;
+        if (best != labels[i]) { labels[i] = best; changed = true; }
       }
       if (!changed) break;
     }
@@ -1224,35 +1222,22 @@ class _FRLayout {
     return labels.map((l) => map[l]!).toList();
   }
 
-  /// Community-aware force-directed 2D layout (sort tab).
-  /// Detects friend groups via label propagation, places community centroids
-  /// in a circle around self, then runs FR with a cohesion term so groups
-  /// stay clustered while still being pulled by actual relationship springs.
   static (List<double>, List<double>) compute2DGrouped({
-    required int n,
-    required int selfIdx,
+    required int n, required int selfIdx,
     required List<(int, int, double)> edges,
-    required double shortSide,
-    int iterations = 130,
+    required double shortSide, int iterations = 130,
   }) {
     if (n == 0) return (<double>[], <double>[]);
     final rng = Random(42);
     final px = List<double>.filled(n, 0);
     final py = List<double>.filled(n, 0);
 
-    // Detect communities.
     final communities = _detectCommunities(n: n, edges: edges);
-
-    // Group by community, sort descending by size for stable centroid placement.
     final communityGroups = <int, List<int>>{};
-    for (int i = 0; i < n; i++) {
-      communityGroups.putIfAbsent(communities[i], () => []).add(i);
-    }
+    for (int i = 0; i < n; i++) communityGroups.putIfAbsent(communities[i], () => []).add(i);
     final sortedCIds = communityGroups.keys.toList()
-      ..sort((a, b) =>
-          communityGroups[b]!.length.compareTo(communityGroups[a]!.length));
+      ..sort((a, b) => communityGroups[b]!.length.compareTo(communityGroups[a]!.length));
 
-    // Self's community centroid → origin; others placed in a circle.
     final selfCommunity = communities[selfIdx];
     final otherCIds = sortedCIds.where((c) => c != selfCommunity).toList();
     final centX = <int, double>{selfCommunity: 0.0};
@@ -1264,7 +1249,6 @@ class _FRLayout {
       centY[otherCIds[ci]] = centroidR * sin(angle);
     }
 
-    // Initialize positions scattered near each community centroid.
     for (int i = 0; i < n; i++) {
       if (i == selfIdx) continue;
       final c = communities[i];
@@ -1278,213 +1262,44 @@ class _FRLayout {
     final k = sqrt(area / max(n, 4)) * 1.4;
     const double minGap = 50.0;
     double temp = shortSide * 0.09;
-
     final fx = List<double>.filled(n, 0);
     final fy = List<double>.filled(n, 0);
 
     for (int iter = 0; iter < iterations; iter++) {
-      for (int i = 0; i < n; i++) {
-        fx[i] = 0;
-        fy[i] = 0;
-      }
-
-      // Repulsion.
+      for (int i = 0; i < n; i++) { fx[i] = 0; fy[i] = 0; }
       for (int i = 0; i < n; i++) {
         for (int j = i + 1; j < n; j++) {
-          double dx = px[i] - px[j];
-          double dy = py[i] - py[j];
+          double dx = px[i] - px[j], dy = py[i] - py[j];
           double dist = sqrt(dx * dx + dy * dy);
           if (dist < 0.5) {
-            dx = (rng.nextDouble() - 0.5) * 6;
-            dy = (rng.nextDouble() - 0.5) * 6;
+            dx = (rng.nextDouble() - 0.5) * 6; dy = (rng.nextDouble() - 0.5) * 6;
             dist = sqrt(dx * dx + dy * dy);
             if (dist < 0.01) dist = 0.01;
           }
           final invDist = 1 / dist;
           var force = (k * k) * invDist;
           if (dist < minGap) force += (minGap - dist) * 14;
-          fx[i] += dx * invDist * force;
-          fy[i] += dy * invDist * force;
-          fx[j] -= dx * invDist * force;
-          fy[j] -= dy * invDist * force;
+          fx[i] += dx * invDist * force; fy[i] += dy * invDist * force;
+          fx[j] -= dx * invDist * force; fy[j] -= dy * invDist * force;
         }
       }
-
-      // Attraction: relationship-weighted springs.
       for (final (i, j, mult) in edges) {
-        final dx = px[i] - px[j];
-        final dy = py[i] - py[j];
+        final dx = px[i] - px[j], dy = py[i] - py[j];
         double dist = sqrt(dx * dx + dy * dy);
         if (dist < 1) dist = 1;
         final invDist = 1 / dist;
         final force = (dist * dist) / k * mult;
-        fx[i] -= dx * invDist * force;
-        fy[i] -= dy * invDist * force;
-        fx[j] += dx * invDist * force;
-        fy[j] += dy * invDist * force;
+        fx[i] -= dx * invDist * force; fy[i] -= dy * invDist * force;
+        fx[j] += dx * invDist * force; fy[j] += dy * invDist * force;
       }
-
-      // Community cohesion: soft pull toward community centroid.
       for (int i = 0; i < n; i++) {
         if (i == selfIdx) continue;
         final c = communities[i];
         fx[i] -= (px[i] - centX[c]!) * 0.014;
         fy[i] -= (py[i] - centY[c]!) * 0.014;
-      }
-
-      // Gravity toward origin (reduced to allow communities to spread out).
-      for (int i = 0; i < n; i++) {
-        if (i == selfIdx) continue;
         fx[i] -= px[i] * 0.001;
         fy[i] -= py[i] * 0.001;
       }
-
-      // Apply clamped displacement.
-      for (int i = 0; i < n; i++) {
-        if (i == selfIdx) {
-          px[i] = 0;
-          py[i] = 0;
-          continue;
-        }
-        final mag = sqrt(fx[i] * fx[i] + fy[i] * fy[i]);
-        if (mag < 0.001) continue;
-        final clamped = min(mag, temp);
-        px[i] += fx[i] / mag * clamped;
-        py[i] += fy[i] / mag * clamped;
-      }
-
-      temp = max(temp * 0.96, 0.4);
-    }
-
-    // Post-process: guarantee no overlap.
-    for (int pass = 0; pass < 120; pass++) {
-      bool anyOverlap = false;
-      for (int i = 0; i < n; i++) {
-        for (int j = i + 1; j < n; j++) {
-          final dx = px[i] - px[j];
-          final dy = py[i] - py[j];
-          final d = sqrt(dx * dx + dy * dy);
-          if (d < minGap && d > 0.01) {
-            final push = (minGap - d) * 0.55;
-            final nx = dx / d;
-            final ny = dy / d;
-            if (i == selfIdx) {
-              px[j] -= nx * push * 2;
-              py[j] -= ny * push * 2;
-            } else if (j == selfIdx) {
-              px[i] += nx * push * 2;
-              py[i] += ny * push * 2;
-            } else {
-              px[i] += nx * push;
-              py[i] += ny * push;
-              px[j] -= nx * push;
-              py[j] -= ny * push;
-            }
-            anyOverlap = true;
-          }
-        }
-      }
-      if (!anyOverlap) break;
-    }
-
-    px[selfIdx] = 0;
-    py[selfIdx] = 0;
-
-    _separateNodesFromEdges(
-        n: n, px: px, py: py, edges: edges, anchored: {selfIdx});
-    px[selfIdx] = 0;
-    py[selfIdx] = 0;
-
-    return (px, py);
-  }
-
-  // edges: (fromIdx, toIdx, springMultiplier)
-  // springMultiplier > 1 = stronger pull (bestFriend) → nodes end up closer;
-  // springMultiplier < 1 = weaker pull (acquaintance) → nodes drift further apart.
-  static (List<double>, List<double>) compute2D({
-    required int n,
-    required int selfIdx,
-    required List<(int, int, double)> edges,
-    required double shortSide,
-    int iterations = 100,
-  }) {
-    final rng = Random(42);
-    final px = List<double>.filled(n, 0);
-    final py = List<double>.filled(n, 0);
-
-    for (int i = 0; i < n; i++) {
-      if (i == selfIdx) continue;
-      final angle = 2 * pi * i / max(n - 1, 1) + rng.nextDouble() * 0.4;
-      final r = shortSide * (0.22 + rng.nextDouble() * 0.24);
-      px[i] = r * cos(angle);
-      py[i] = r * sin(angle);
-    }
-
-    final area = shortSide * shortSide;
-    final k = sqrt(area / max(n, 4)) * 1.4;
-    // Minimum gap: 50 px covers the worst case (self r=26 + direct r=19 + 5px pad).
-    const double minGap = 50.0;
-    double temp = shortSide * 0.09;
-
-    final fx = List<double>.filled(n, 0);
-    final fy = List<double>.filled(n, 0);
-
-    for (int iter = 0; iter < iterations; iter++) {
-      for (int i = 0; i < n; i++) {
-        fx[i] = 0;
-        fy[i] = 0;
-      }
-
-      // ---- Repulsion: all pairs ----
-      for (int i = 0; i < n; i++) {
-        for (int j = i + 1; j < n; j++) {
-          double dx = px[i] - px[j];
-          double dy = py[i] - py[j];
-          double dist = sqrt(dx * dx + dy * dy);
-          if (dist < 0.5) {
-            dx = (rng.nextDouble() - 0.5) * 6;
-            dy = (rng.nextDouble() - 0.5) * 6;
-            dist = sqrt(dx * dx + dy * dy);
-            if (dist < 0.01) dist = 0.01;
-          }
-          final invDist = 1 / dist;
-          // Coulomb repulsion + hard spring when too close
-          var force = (k * k) * invDist;
-          if (dist < minGap) force += (minGap - dist) * 14;
-          final ux = dx * invDist;
-          final uy = dy * invDist;
-          fx[i] += ux * force;
-          fy[i] += uy * force;
-          fx[j] -= ux * force;
-          fy[j] -= uy * force;
-        }
-      }
-
-      // ---- Attraction: relationship-weighted spring ----
-      for (final (i, j, mult) in edges) {
-        final dx = px[i] - px[j];
-        final dy = py[i] - py[j];
-        double dist = sqrt(dx * dx + dy * dy);
-        if (dist < 1) dist = 1;
-        final invDist = 1 / dist;
-        // mult > 1 amplifies pull → equilibrium distance shrinks
-        final force = (dist * dist) / k * mult;
-        final ux = dx * invDist;
-        final uy = dy * invDist;
-        fx[i] -= ux * force;
-        fy[i] -= uy * force;
-        fx[j] += ux * force;
-        fy[j] += uy * force;
-      }
-
-      // ---- Weak gravity toward origin ----
-      for (int i = 0; i < n; i++) {
-        if (i == selfIdx) continue;
-        fx[i] -= px[i] * 0.003;
-        fy[i] -= py[i] * 0.003;
-      }
-
-      // ---- Apply clamped displacement ----
       for (int i = 0; i < n; i++) {
         if (i == selfIdx) { px[i] = 0; py[i] = 0; continue; }
         final mag = sqrt(fx[i] * fx[i] + fy[i] * fy[i]);
@@ -1493,64 +1308,37 @@ class _FRLayout {
         px[i] += fx[i] / mag * clamped;
         py[i] += fy[i] / mag * clamped;
       }
-
       temp = max(temp * 0.96, 0.4);
     }
 
-    // ---- Post-process: guarantee no two nodes overlap ----
-    // Iterative separation passes: push overlapping pairs apart until resolved.
     for (int pass = 0; pass < 120; pass++) {
       bool anyOverlap = false;
       for (int i = 0; i < n; i++) {
         for (int j = i + 1; j < n; j++) {
-          final dx = px[i] - px[j];
-          final dy = py[i] - py[j];
+          final dx = px[i] - px[j], dy = py[i] - py[j];
           final d = sqrt(dx * dx + dy * dy);
           if (d < minGap && d > 0.01) {
             final push = (minGap - d) * 0.55;
-            final nx = dx / d;
-            final ny = dy / d;
-            // Keep self anchored at origin; push the other node harder.
-            if (i == selfIdx) {
-              px[j] -= nx * push * 2;
-              py[j] -= ny * push * 2;
-            } else if (j == selfIdx) {
-              px[i] += nx * push * 2;
-              py[i] += ny * push * 2;
-            } else {
-              px[i] += nx * push;
-              py[i] += ny * push;
-              px[j] -= nx * push;
-              py[j] -= ny * push;
-            }
+            final nx = dx / d, ny = dy / d;
+            if (i == selfIdx) { px[j] -= nx * push * 2; py[j] -= ny * push * 2; }
+            else if (j == selfIdx) { px[i] += nx * push * 2; py[i] += ny * push * 2; }
+            else { px[i] += nx * push; py[i] += ny * push; px[j] -= nx * push; py[j] -= ny * push; }
             anyOverlap = true;
           }
         }
       }
       if (!anyOverlap) break;
     }
-
-    // Re-anchor self (separation passes may have drifted it slightly).
-    px[selfIdx] = 0;
-    py[selfIdx] = 0;
-
-    // ---- Post-process: push nodes away from edges they don't belong to ----
-    _separateNodesFromEdges(
-      n: n, px: px, py: py, edges: edges,
-      anchored: {selfIdx},
-    );
-    px[selfIdx] = 0;
-    py[selfIdx] = 0;
-
+    px[selfIdx] = 0; py[selfIdx] = 0;
+    _separateNodesFromEdges(n: n, px: px, py: py, edges: edges, anchored: {selfIdx});
+    px[selfIdx] = 0; py[selfIdx] = 0;
     return (px, py);
   }
 
   static (List<double>, List<double>, List<double>) compute3D({
-    required int n,
-    required int selfIdx,
+    required int n, required int selfIdx,
     required List<(int, int, double)> edges,
-    required double shortSide,
-    int iterations = 90,
+    required double shortSide, int iterations = 90,
   }) {
     final rng = Random(43);
     final px = List<double>.filled(n, 0);
@@ -1572,87 +1360,49 @@ class _FRLayout {
     final k = sqrt(area / max(n, 4)) * 0.85;
     final minDist = 32.0;
     double temp = shortSide * 0.08;
-
     final fx = List<double>.filled(n, 0);
     final fy = List<double>.filled(n, 0);
     final fz = List<double>.filled(n, 0);
 
     for (int iter = 0; iter < iterations; iter++) {
-      for (int i = 0; i < n; i++) {
-        fx[i] = 0;
-        fy[i] = 0;
-        fz[i] = 0;
-      }
-
+      for (int i = 0; i < n; i++) { fx[i] = 0; fy[i] = 0; fz[i] = 0; }
       for (int i = 0; i < n; i++) {
         for (int j = i + 1; j < n; j++) {
-          double dx = px[i] - px[j];
-          double dy = py[i] - py[j];
-          double dz = pz[i] - pz[j];
-          double dist = sqrt(dx * dx + dy * dy + dz * dz);
+          double dx = px[i]-px[j], dy = py[i]-py[j], dz = pz[i]-pz[j];
+          double dist = sqrt(dx*dx + dy*dy + dz*dz);
           if (dist < 0.5) {
-            dx = (rng.nextDouble() - 0.5) * 5;
-            dy = (rng.nextDouble() - 0.5) * 5;
-            dz = (rng.nextDouble() - 0.5) * 5;
-            dist = sqrt(dx * dx + dy * dy + dz * dz);
+            dx=(rng.nextDouble()-0.5)*5; dy=(rng.nextDouble()-0.5)*5; dz=(rng.nextDouble()-0.5)*5;
+            dist = sqrt(dx*dx+dy*dy+dz*dz);
             if (dist < 0.01) dist = 0.01;
           }
-          final invDist = 1 / dist;
-          var force = (k * k) * invDist;
-          if (dist < minDist) force += (minDist - dist) * 8;
-          final ux = dx * invDist;
-          final uy = dy * invDist;
-          final uz = dz * invDist;
-          fx[i] += ux * force;
-          fy[i] += uy * force;
-          fz[i] += uz * force;
-          fx[j] -= ux * force;
-          fy[j] -= uy * force;
-          fz[j] -= uz * force;
+          final invDist = 1/dist;
+          var force = (k*k)*invDist;
+          if (dist < minDist) force += (minDist-dist)*8;
+          fx[i]+=dx*invDist*force; fy[i]+=dy*invDist*force; fz[i]+=dz*invDist*force;
+          fx[j]-=dx*invDist*force; fy[j]-=dy*invDist*force; fz[j]-=dz*invDist*force;
         }
       }
-
-      for (final (i, j, mult) in edges) {
-        final dx = px[i] - px[j];
-        final dy = py[i] - py[j];
-        final dz = pz[i] - pz[j];
-        double dist = sqrt(dx * dx + dy * dy + dz * dz);
-        if (dist < 1) dist = 1;
-        final invDist = 1 / dist;
-        final force = (dist * dist) / k * mult;
-        final ux = dx * invDist;
-        final uy = dy * invDist;
-        final uz = dz * invDist;
-        fx[i] -= ux * force;
-        fy[i] -= uy * force;
-        fz[i] -= uz * force;
-        fx[j] += ux * force;
-        fy[j] += uy * force;
-        fz[j] += uz * force;
+      for (final (i,j,mult) in edges) {
+        final dx=px[i]-px[j], dy=py[i]-py[j], dz=pz[i]-pz[j];
+        double dist = sqrt(dx*dx+dy*dy+dz*dz);
+        if (dist<1) dist=1;
+        final invDist=1/dist;
+        final force=(dist*dist)/k*mult;
+        fx[i]-=dx*invDist*force; fy[i]-=dy*invDist*force; fz[i]-=dz*invDist*force;
+        fx[j]+=dx*invDist*force; fy[j]+=dy*invDist*force; fz[j]+=dz*invDist*force;
       }
-
-      for (int i = 0; i < n; i++) {
-        if (i == selfIdx) continue;
-        fx[i] -= px[i] * 0.006;
-        fy[i] -= py[i] * 0.006;
-        fz[i] -= pz[i] * 0.006;
+      for (int i=0; i<n; i++) {
+        if (i==selfIdx) continue;
+        fx[i]-=px[i]*0.006; fy[i]-=py[i]*0.006; fz[i]-=pz[i]*0.006;
       }
-
-      for (int i = 0; i < n; i++) {
-        if (i == selfIdx) {
-          px[i] = 0;
-          py[i] = 0;
-          pz[i] = 0;
-          continue;
-        }
-        final mag = sqrt(fx[i] * fx[i] + fy[i] * fy[i] + fz[i] * fz[i]);
-        if (mag < 0.001) continue;
-        final clamped = min(mag, temp);
-        px[i] += fx[i] / mag * clamped;
-        py[i] += fy[i] / mag * clamped;
-        pz[i] += fz[i] / mag * clamped;
+      for (int i=0; i<n; i++) {
+        if (i==selfIdx) { px[i]=0; py[i]=0; pz[i]=0; continue; }
+        final mag=sqrt(fx[i]*fx[i]+fy[i]*fy[i]+fz[i]*fz[i]);
+        if (mag<0.001) continue;
+        final clamped=min(mag,temp);
+        px[i]+=fx[i]/mag*clamped; py[i]+=fy[i]/mag*clamped; pz[i]+=fz[i]/mag*clamped;
       }
-      temp = max(temp * 0.965, 0.4);
+      temp = max(temp*0.965, 0.4);
     }
     return (px, py, pz);
   }
@@ -1674,14 +1424,18 @@ class _GraphPainter extends CustomPainter {
   final GraphViewState view;
   final Map<String, ui.Image> profileImages;
   final int imageVersion;
-  /// Previous 2D positions for recenter animation (empty when not animating).
   final Map<String, Offset> animFrom;
-  /// Drives the recenter animation: 0 = old positions, 1 = new positions.
   final ValueNotifier<double> animT;
-  /// Active colour profile — drives every ink/paper/accent colour below.
   final ColorProfile palette;
+  // New fields
+  final Map<String, Offset> nodeOverrides;
+  final List<Group> groups;
+  final List<Offset> lassoPoints;
+  final bool sortMode;
+  final DecoStyle decoStyle;
+  final bool editMode;
+  final double sortResistanceProgress;
 
-  // Cached paint objects — allocated once per painter, mutated per draw call.
   final _fillPaint = Paint();
   final _rimPaint = Paint()
     ..style = PaintingStyle.stroke
@@ -1693,10 +1447,8 @@ class _GraphPainter extends CustomPainter {
     ..style = PaintingStyle.stroke
     ..strokeCap = StrokeCap.round
     ..strokeJoin = StrokeJoin.round;
-  // Faint ink dot for the notebook grid (colour set per-draw from the palette).
   final _gridPaint = Paint()..strokeCap = StrokeCap.round;
 
-  // Cached paper picture, invalidated only when size changes.
   ui.Picture? _bgPicture;
   Size _bgPictureSize = Size.zero;
 
@@ -1715,10 +1467,20 @@ class _GraphPainter extends CustomPainter {
     required this.animFrom,
     required this.animT,
     required this.palette,
+    required this.nodeOverrides,
+    required this.groups,
+    required this.lassoPoints,
+    required this.sortMode,
+    required this.decoStyle,
+    required this.editMode,
+    required this.sortResistanceProgress,
   }) : super(repaint: Listenable.merge([view, animT]));
 
-  /// Per-node ink opacity (matches the body pass so rings line up with fills).
   double _nodeOpacity(_WorldNode node) {
+    if (sortMode) {
+      final highlighted = highlightedIds == null || highlightedIds!.contains(node.user.id);
+      return highlighted ? 1.0 : 0.15;
+    }
     if (useConcentricLayout && !is3D && node.ringDepth >= 0) {
       final d = node.ringDepth;
       if (d <= 1) return 1.0;
@@ -1727,8 +1489,7 @@ class _GraphPainter extends CustomPainter {
       return 0.12;
     }
     final primary = _isPrimary(node.user);
-    final highlighted =
-        highlightedIds == null || highlightedIds!.contains(node.user.id);
+    final highlighted = highlightedIds == null || highlightedIds!.contains(node.user.id);
     if (!highlighted) return 0.18;
     if (!primary) return 0.45;
     return 1.0;
@@ -1741,7 +1502,7 @@ class _GraphPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    _drawPaper(canvas, size);
+    _drawBackground(canvas, size);
     if (worldNodes.isEmpty) return;
 
     canvas.save();
@@ -1751,7 +1512,6 @@ class _GraphPainter extends CustomPainter {
     canvas.scale(view.scale);
     canvas.translate(-cx, -cy);
 
-    // Visible region in painter space (used by the dot grid).
     final inv = 1.0 / view.scale;
     final bounds = Rect.fromPoints(
       Offset((0 - cx - view.pan.dx) * inv + cx, (0 - cy - view.pan.dy) * inv + cy),
@@ -1759,32 +1519,30 @@ class _GraphPainter extends CustomPainter {
           (size.height - cy - view.pan.dy) * inv + cy),
     );
 
-    // Notebook dot grid + pen doodles live on the same drawing plane as the
-    // nodes (world space), so they pan/zoom with the graph.
-    _drawDotGrid(canvas, bounds);
-    _drawDoodles(canvas, cx, cy);
+    if (!sortMode) {
+      _drawDotGrid(canvas, bounds);
+      _drawDoodles(canvas, cx, cy);
+    }
 
-    // Compute screen positions in painter-space (pre view-transform).
     final n = worldNodes.length;
     final posList = List<Offset>.filled(n, Offset.zero);
     final radList = List<double>.filled(n, 0);
     final depths = List<double>.filled(n, 0);
-
-    // Scale compensation: shrink nodes when zoomed in, grow when zoomed out.
-    // Full inverse-scale in the readable range; clamped at both ends.
-    // min 0.45 → nodes don't vanish at high zoom-in (still slightly visible).
-    // max 1.7  → nodes don't flood the screen at high zoom-out.
     final comp = (1.0 / view.scale).clamp(0.45, 1.7);
+    // Build id → index map for groups
+    final idToIdx = <String, int>{for (int i = 0; i < n; i++) worldNodes[i].user.id: i};
 
     if (is3D) {
       final cosX = cos(view.rotX), sinX = sin(view.rotX);
       final cosY = cos(view.rotY), sinY = sin(view.rotY);
       for (int i = 0; i < n; i++) {
         final node = worldNodes[i];
-        final x1 = node.wx * cosY + node.wz * sinY;
-        final z1 = -node.wx * sinY + node.wz * cosY;
-        final y2 = node.wy * cosX - z1 * sinX;
-        final z2 = node.wy * sinX + z1 * cosX;
+        final wx = nodeOverrides[node.user.id]?.dx ?? node.wx;
+        final wy = nodeOverrides[node.user.id]?.dy ?? node.wy;
+        final x1 = wx * cosY + node.wz * sinY;
+        final z1 = -wx * sinY + node.wz * cosY;
+        final y2 = wy * cosX - z1 * sinX;
+        final z2 = wy * sinX + z1 * cosX;
         final dz = max(z2 + _fov, 20.0);
         final s = _fov / dz;
         posList[i] = Offset(cx + x1 * s, cy + y2 * s);
@@ -1792,13 +1550,13 @@ class _GraphPainter extends CustomPainter {
         depths[i] = z2;
       }
     } else {
-      // 2D: optionally interpolate from previous positions (recenter animation).
       final t = animT.value;
       final animating = t < 1.0 && animFrom.isNotEmpty;
       for (int i = 0; i < n; i++) {
         final node = worldNodes[i];
-        double wx = node.wx, wy = node.wy;
-        if (animating) {
+        double wx = nodeOverrides[node.user.id]?.dx ?? node.wx;
+        double wy = nodeOverrides[node.user.id]?.dy ?? node.wy;
+        if (animating && nodeOverrides[node.user.id] == null) {
           final from = animFrom[node.user.id];
           if (from != null) {
             wx = ui.lerpDouble(from.dx, wx, t)!;
@@ -1811,82 +1569,292 @@ class _GraphPainter extends CustomPainter {
       }
     }
 
-    // ---- Edges: plain ink pen lines ----
-    if (showEdges) {
+    // ---- Group circles (draw before nodes) ----
+    if (!sortMode) {
+      _drawGroups(canvas, posList, idToIdx);
+    }
+
+    // ---- Edges ----
+    if (showEdges && !sortMode) {
       for (final e in worldEdges) {
         if (e.fromIdx >= n || e.toIdx >= n) continue;
         double alpha = e.opacity;
         double width = e.thickness;
         if (useConcentricLayout && !is3D) {
-          if (e.isPrimary) {
-            alpha = (e.opacity * 2.4).clamp(0.0, 0.82);
-            width = e.thickness * 1.7;
-          } else {
-            alpha = e.opacity * 0.20;
-          }
+          if (e.isPrimary) { alpha = (e.opacity * 2.4).clamp(0.0, 0.82); width = e.thickness * 1.7; }
+          else { alpha = e.opacity * 0.20; }
         }
-        // Width is comp-compensated so lines don't fatten on zoom.
         _edgePaint
           ..color = palette.ink.withValues(alpha: (alpha * 1.5).clamp(0.0, 0.9))
           ..strokeWidth = width * comp;
-        _drawSketchEdge(
-          canvas,
-          posList[e.fromIdx],
-          posList[e.toIdx],
-          _edgePaint,
-          e.fromIdx * 911 + e.toIdx,
-          dashed: e.dashed,
-        );
+        _drawSketchEdge(canvas, posList[e.fromIdx], posList[e.toIdx], _edgePaint,
+            e.fromIdx * 911 + e.toIdx, dashed: e.dashed);
       }
     }
 
-    // Depth-sort indices (farther first) for 3D
+    // Depth sort for 3D
     final order = List<int>.generate(n, (i) => i);
-    // Descending z2: larger z2 = farther from camera → draw first (painter's algorithm).
-    // Smaller z2 = closer (perspective scale s is larger) → draw last, on top.
     if (is3D) order.sort((a, b) => depths[b].compareTo(depths[a]));
 
-    // ---- Nodes: body (fills/icon/label) then the double pen ring ----
-    for (final i in order) {
-      _drawNodeBody(canvas, worldNodes[i], posList[i], radList[i]);
-      _drawNodeRings(canvas, worldNodes[i], posList[i], radList[i]);
+    // ---- Nodes ----
+    if (sortMode) {
+      _drawSortModeNodes(canvas, order, posList, radList);
+    } else {
+      for (final i in order) {
+        _drawNodeBody(canvas, worldNodes[i], posList[i], radList[i]);
+        _drawNodeRings(canvas, worldNodes[i], posList[i], radList[i]);
+      }
+    }
+
+    // Edit mode: highlight dragged node
+    if (editMode) {
+      for (int i = 0; i < n; i++) {
+        if (nodeOverrides.containsKey(worldNodes[i].user.id)) {
+          _fillPaint.color = palette.accent.withValues(alpha: 0.25);
+          canvas.drawCircle(posList[i], radList[i] + 4, _fillPaint);
+        }
+      }
     }
 
     canvas.restore();
+
+    // ---- Lasso overlay (screen space) ----
+    if (lassoPoints.length >= 2) {
+      _drawLasso(canvas);
+    }
+
+    // ---- Sort mode resistance arc ----
+    if (sortResistanceProgress > 0.0 && !sortMode) {
+      _drawResistanceArc(canvas, size);
+    }
   }
 
-  /// Renders the cream sketchbook page wash into a cached Picture. The dot grid
-  /// and doodles are drawn separately in world space so they move with the
-  /// content; only this flat paper layer is cached (rebuilt on size change).
+  void _drawResistanceArc(Canvas canvas, Size size) {
+    const arcR = 32.0;
+    final cx = size.width / 2;
+    final cy = size.height / 2;
+    // Background ring
+    canvas.drawCircle(
+        Offset(cx, cy), arcR,
+        Paint()
+          ..color = palette.ink.withValues(alpha: 0.10)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 5.0);
+    // Progress arc
+    final rect = Rect.fromCircle(center: Offset(cx, cy), radius: arcR);
+    canvas.drawArc(
+        rect,
+        -pi / 2,
+        2 * pi * sortResistanceProgress,
+        false,
+        Paint()
+          ..color = palette.accent.withValues(alpha: 0.85)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 5.0
+          ..strokeCap = StrokeCap.round);
+    // Icon in center
+    final tp = TextPainter(
+      text: TextSpan(
+        text: 'sort',
+        style: TextStyle(
+          color: palette.ink.withValues(alpha: 0.6),
+          fontSize: 10,
+          fontWeight: FontWeight.w700,
+          fontFamily: AppTheme.bodyFamily,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    tp.paint(canvas, Offset(cx - tp.width / 2, cy - tp.height / 2));
+    tp.dispose();
+  }
+
+  // ---- Group shapes: axis-aligned rounded rectangles ----
+
+  void _drawGroups(Canvas canvas, List<Offset> posList, Map<String, int> idToIdx) {
+    for (final group in groups) {
+      final memberPos = group.memberIds
+          .map((id) => idToIdx[id] != null ? posList[idToIdx[id]!] : null)
+          .whereType<Offset>()
+          .toList();
+      if (memberPos.isEmpty) continue;
+
+      double minX = memberPos.first.dx, maxX = memberPos.first.dx;
+      double minY = memberPos.first.dy, maxY = memberPos.first.dy;
+      for (final p in memberPos) {
+        if (p.dx < minX) minX = p.dx;
+        if (p.dx > maxX) maxX = p.dx;
+        if (p.dy < minY) minY = p.dy;
+        if (p.dy > maxY) maxY = p.dy;
+      }
+      const pad = 42.0;
+      const cornerR = 20.0;
+      final rect = Rect.fromLTRB(minX - pad, minY - pad, maxX + pad, maxY + pad);
+      final rrect = RRect.fromRectAndRadius(rect, const Radius.circular(cornerR));
+
+      // Fill
+      canvas.drawRRect(rrect, Paint()..color = group.color.withValues(alpha: 0.09));
+      // Border (dashed look via two paints)
+      canvas.drawRRect(rrect,
+          Paint()
+            ..color = group.color.withValues(alpha: 0.50)
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 1.6);
+
+      // Label — top-left of the box
+      final tp = TextPainter(
+        text: TextSpan(
+          text: group.name,
+          style: TextStyle(
+            color: group.color.withValues(alpha: 0.9),
+            fontSize: 11,
+            fontWeight: FontWeight.w700,
+            fontFamily: AppTheme.bodyFamily,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      tp.paint(canvas, Offset(minX - pad + 8, minY - pad - tp.height - 4));
+      tp.dispose();
+    }
+  }
+
+  // ---- Sort mode: uniform abstract dots ----
+
+  void _drawSortModeNodes(
+      Canvas canvas, List<int> order, List<Offset> posList, List<double> radList) {
+    for (final i in order) {
+      final node = worldNodes[i];
+      final isSelf = node.user.id == 'self';
+      final opacity = _nodeOpacity(node);
+      final dotR = isSelf ? 10.0 : 6.0;
+      final color = isSelf
+          ? palette.accent.withValues(alpha: opacity)
+          : (highlightedIds != null && highlightedIds!.contains(node.user.id))
+              ? palette.ink.withValues(alpha: opacity * 0.75)
+              : palette.ink.withValues(alpha: opacity * 0.25);
+      canvas.drawCircle(posList[i], dotR, Paint()..color = color);
+    }
+  }
+
+  // ---- Lasso ----
+
+  void _drawLasso(Canvas canvas) {
+    final path = Path()..moveTo(lassoPoints.first.dx, lassoPoints.first.dy);
+    for (final p in lassoPoints.skip(1)) path.lineTo(p.dx, p.dy);
+    if (lassoPoints.length > 2) path.close();
+
+    canvas.drawPath(path,
+        Paint()
+          ..color = palette.accent.withValues(alpha: 0.15)
+          ..style = PaintingStyle.fill);
+    canvas.drawPath(path,
+        Paint()
+          ..color = palette.accent.withValues(alpha: 0.8)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.8
+          ..strokeCap = StrokeCap.round
+          ..strokeJoin = StrokeJoin.round);
+  }
+
+  // ---- Background ----
+
+  void _drawBackground(Canvas canvas, Size size) {
+    switch (decoStyle) {
+      case DecoStyle.sketchbook:
+        _drawPaper(canvas, size);
+      case DecoStyle.starry:
+        _drawStarryBackground(canvas, size);
+      case DecoStyle.sakura:
+        _drawSakuraBackground(canvas, size);
+      case DecoStyle.ocean:
+        _drawOceanBackground(canvas, size);
+    }
+  }
+
   void _drawPaper(Canvas canvas, Size size) {
     if (_bgPicture == null || _bgPictureSize != size) {
       final recorder = ui.PictureRecorder();
       final c = Canvas(recorder);
       final full = Rect.fromLTWH(0, 0, size.width, size.height);
-
-      // Warm paper with a barely-there top-to-bottom shading.
-      c.drawRect(
-        full,
-        Paint()
-          ..shader = LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [palette.background, palette.paperLow],
-          ).createShader(full),
-      );
-
+      c.drawRect(full,
+          Paint()
+            ..shader = LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [palette.background, palette.paperLow],
+            ).createShader(full));
       _bgPicture = recorder.endRecording();
       _bgPictureSize = size;
     }
     canvas.drawPicture(_bgPicture!);
   }
 
-  /// Draws the faint notebook dot grid in WORLD space (called inside the view
-  /// transform) so the grid pans and zooms together with the drawing — the page
-  /// moves with the content rather than sitting under a sliding graph.
+  void _drawStarryBackground(Canvas canvas, Size size) {
+    canvas.drawRect(Rect.fromLTWH(0, 0, size.width, size.height),
+        Paint()..color = const Color(0xFF0D0D2B));
+    final rng = Random(99);
+    final starPaint = Paint()..color = Colors.white.withValues(alpha: 0.7);
+    for (int i = 0; i < 140; i++) {
+      final x = rng.nextDouble() * size.width;
+      final y = rng.nextDouble() * size.height;
+      final r = 0.5 + rng.nextDouble() * 1.5;
+      canvas.drawCircle(Offset(x, y), r, starPaint..color = Colors.white.withValues(alpha: 0.3 + rng.nextDouble() * 0.6));
+    }
+  }
+
+  void _drawSakuraBackground(Canvas canvas, Size size) {
+    canvas.drawRect(Rect.fromLTWH(0, 0, size.width, size.height),
+        Paint()
+          ..shader = LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [const Color(0xFFFFF0F5), const Color(0xFFFFE4EC)],
+          ).createShader(Rect.fromLTWH(0, 0, size.width, size.height)));
+    final rng = Random(77);
+    final petalPaint = Paint()
+      ..color = const Color(0xFFFFB7CC).withValues(alpha: 0.4)
+      ..style = PaintingStyle.fill;
+    for (int i = 0; i < 30; i++) {
+      final x = rng.nextDouble() * size.width;
+      final y = rng.nextDouble() * size.height;
+      canvas.save();
+      canvas.translate(x, y);
+      canvas.rotate(rng.nextDouble() * pi);
+      canvas.drawOval(
+        Rect.fromCenter(center: Offset.zero,
+            width: 10 + rng.nextDouble() * 14, height: 6 + rng.nextDouble() * 8),
+        petalPaint,
+      );
+      canvas.restore();
+    }
+  }
+
+  void _drawOceanBackground(Canvas canvas, Size size) {
+    canvas.drawRect(Rect.fromLTWH(0, 0, size.width, size.height),
+        Paint()
+          ..shader = LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [const Color(0xFF0A2F5E), const Color(0xFF0E4D8A)],
+          ).createShader(Rect.fromLTWH(0, 0, size.width, size.height)));
+    final wavePaint = Paint()
+      ..color = Colors.white.withValues(alpha: 0.05)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.5;
+    for (int wave = 0; wave < 6; wave++) {
+      final path = Path();
+      final baseY = size.height * (0.2 + wave * 0.12);
+      path.moveTo(0, baseY);
+      for (double x = 0; x <= size.width; x += 8) {
+        path.lineTo(x, baseY + sin(x * 0.02 + wave) * 12);
+      }
+      canvas.drawPath(path, wavePaint);
+    }
+  }
+
   void _drawDotGrid(Canvas canvas, Rect bounds) {
     const gap = 26.0;
-    // Snap the start to the grid so dots keep fixed world positions as we pan.
     final startX = (bounds.left / gap).floorToDouble() * gap;
     final startY = (bounds.top / gap).floorToDouble() * gap;
     final points = <Offset>[];
@@ -1895,15 +1863,10 @@ class _GraphPainter extends CustomPainter {
         points.add(Offset(x, y));
       }
     }
-    // One batched call; strokeWidth = dot diameter (round cap → round dots).
-    _gridPaint
-      ..color = palette.ink.withValues(alpha: 0.09)
-      ..strokeWidth = 2.0;
+    _gridPaint..color = palette.ink.withValues(alpha: 0.09)..strokeWidth = 2.0;
     canvas.drawPoints(ui.PointMode.points, points, _gridPaint);
   }
 
-  /// Draws the pen-ink margin doodles in WORLD space — called inside the view
-  /// transform so they pan and zoom together with the nodes.
   void _drawDoodles(Canvas canvas, double cx, double cy) {
     final stroke = Paint()
       ..style = PaintingStyle.stroke
@@ -1921,43 +1884,26 @@ class _GraphPainter extends CustomPainter {
       } else {
         stroke
           ..color = palette.ink.withValues(alpha: d.opacity)
-          ..strokeWidth = 1.5 / d.size; // ~1.5px after the scale.
+          ..strokeWidth = 1.5 / d.size;
         canvas.drawPath(d.path, stroke);
       }
       canvas.restore();
     }
   }
 
-  /// Draws an edge as a gently wavering hand-drawn pen line (a single cubic with
-  /// two seeded perpendicular bumps) instead of a ruler-straight segment. When
-  /// [dashed] is set the line is rendered as a hand-drawn dotted/dashed trail.
-  void _drawSketchEdge(
-      Canvas canvas, Offset a, Offset b, Paint paint, int seed,
+  void _drawSketchEdge(Canvas canvas, Offset a, Offset b, Paint paint, int seed,
       {bool dashed = false}) {
-    final dx = b.dx - a.dx;
-    final dy = b.dy - a.dy;
+    final dx = b.dx - a.dx, dy = b.dy - a.dy;
     final len = sqrt(dx * dx + dy * dy);
-    if (len < 6) {
-      canvas.drawLine(a, b, paint);
-      return;
-    }
-    // Perpendicular unit vector — the wobble pushes the line off-axis.
-    final nx = -dy / len;
-    final ny = dx / len;
+    if (len < 6) { canvas.drawLine(a, b, paint); return; }
+    final nx = -dy / len, ny = dx / len;
     final amp = (len * 0.04).clamp(1.5, 9.0);
     final o1 = _seedNoise(seed) * amp;
     final o2 = _seedNoise(seed * 31 + 7) * amp;
     final c1 = Offset(a.dx + dx * 0.33 + nx * o1, a.dy + dy * 0.33 + ny * o1);
     final c2 = Offset(a.dx + dx * 0.66 + nx * o2, a.dy + dy * 0.66 + ny * o2);
-    final path = ui.Path()
-      ..moveTo(a.dx, a.dy)
-      ..cubicTo(c1.dx, c1.dy, c2.dx, c2.dy, b.dx, b.dy);
-    if (!dashed) {
-      // Plain stroke — the grain mask layer supplies the dry-brush texture.
-      canvas.drawPath(path, paint);
-      return;
-    }
-    // Weak ties: hand-drawn dotted/dashed trail.
+    final path = ui.Path()..moveTo(a.dx, a.dy)..cubicTo(c1.dx, c1.dy, c2.dx, c2.dy, b.dx, b.dy);
+    if (!dashed) { canvas.drawPath(path, paint); return; }
     const dash = 5.0, gapLen = 4.5;
     for (final metric in path.computeMetrics()) {
       double dist = 0;
@@ -1969,88 +1915,45 @@ class _GraphPainter extends CustomPainter {
     }
   }
 
-  /// Draws everything for a node EXCEPT its pen rings: glow, opaque backing,
-  /// pastel wash, the photo/emoji, and the name label.
   void _drawNodeBody(Canvas canvas, _WorldNode node, Offset pos, double r) {
     final isSelf = node.user.id == 'self';
-
     Color fill;
     double globalOpacity;
     bool showGlow;
 
     if (useConcentricLayout && !is3D && node.ringDepth >= 0) {
-      // Ring-depth-based emphasis (concentric mode).
       fill = isSelf ? palette.accent : node.user.nodeColor;
       final depth = node.ringDepth;
-      if (depth <= 1) {
-        globalOpacity = 1.0;
-        showGlow = true;
-      } else if (depth == 2) {
-        globalOpacity = 0.50;
-        showGlow = false;
-      } else if (depth == 3) {
-        globalOpacity = 0.24;
-        showGlow = false;
-      } else {
-        globalOpacity = 0.12;
-        showGlow = false;
-      }
+      if (depth <= 1) { globalOpacity = 1.0; showGlow = true; }
+      else if (depth == 2) { globalOpacity = 0.50; showGlow = false; }
+      else if (depth == 3) { globalOpacity = 0.24; showGlow = false; }
+      else { globalOpacity = 0.12; showGlow = false; }
     } else {
-      // Existing fade-non-direct / highlight logic.
       final primary = _isPrimary(node.user);
-      final highlighted =
-          highlightedIds == null || highlightedIds!.contains(node.user.id);
-
-      if (isSelf) {
-        fill = palette.accent;
-      } else if (!primary) {
-        fill = _desaturate(node.user.nodeColor, 1.0);
-      } else {
-        fill = node.user.nodeColor;
-      }
-
-      if (!highlighted) {
-        globalOpacity = 0.18;
-      } else if (!primary) {
-        globalOpacity = 0.45;
-      } else {
-        globalOpacity = 1.0;
-      }
+      final highlighted = highlightedIds == null || highlightedIds!.contains(node.user.id);
+      fill = isSelf ? palette.accent : (!primary ? _desaturate(node.user.nodeColor, 1.0) : node.user.nodeColor);
+      globalOpacity = !highlighted ? 0.18 : (!primary ? 0.45 : 1.0);
       showGlow = primary && highlighted;
     }
 
-    // The icon disc sits inside the outer ring with a clear gap between the two
-    // pen circles, giving the "double circle" look.
     final gap = (r * 0.24).clamp(3.0, 7.0);
     final rIcon = (r - gap).clamp(r * 0.5, r);
 
-    // Whisper-soft pastel halo for emphasised nodes (no blur — layered circles).
     if (showGlow) {
       _glowPaint.color = fill.withValues(alpha: 0.10 * globalOpacity);
       canvas.drawCircle(pos, r * 1.7, _glowPaint);
     }
-
-    // Opaque paper backing out to the OUTER ring, so edges running behind the
-    // node never show through the (paper-coloured) gap or a translucent icon.
     _fillPaint.color = palette.background;
     canvas.drawCircle(pos, r, _fillPaint);
-
-    // Pastel wash filling the icon disc so the glyph/photo sits on its colour.
     _fillPaint.color = fill.withValues(alpha: 0.45 * globalOpacity);
     canvas.drawCircle(pos, rIcon, _fillPaint);
 
     final detailed = globalOpacity >= 0.35;
-
-    // ---- Icon (photo or emoji) inside the inner disc ----
     if (detailed) {
       final profileImg = isSelf ? null : profileImages[node.user.id];
       if (profileImg != null) {
         _drawProfileImage(canvas, profileImg, pos, rIcon, globalOpacity);
       } else {
-        // The emoji painter was built at fontSize ∝ node.baseRadius (the layout
-        // radius). Scaling by rIcon / baseRadius — NOT rIcon / r — keeps the
-        // glyph proportional to the comp-compensated icon disc, so it stays a
-        // constant on-screen size on zoom instead of fattening with view.scale.
         final ep = node.emojiPainter;
         canvas.save();
         canvas.translate(pos.dx, pos.dy);
@@ -2060,12 +1963,7 @@ class _GraphPainter extends CustomPainter {
         canvas.restore();
       }
     }
-
     if (!detailed) return;
-
-    // Name label below the outer ring. The painter is a fixed layout-time size,
-    // so comp-compensate it (around the node's bottom edge) to keep the label a
-    // constant on-screen size and gap on zoom — matching the node and rings.
     if (globalOpacity > 0.5 && node.namePainter != null) {
       final np = node.namePainter!;
       final comp = (1.0 / view.scale).clamp(0.45, 1.7);
@@ -2077,8 +1975,6 @@ class _GraphPainter extends CustomPainter {
     }
   }
 
-  /// Draws a node's double pen ring as two clean comp-width circles in the
-  /// unified near-black indigo ink.
   void _drawNodeRings(Canvas canvas, _WorldNode node, Offset pos, double r) {
     final opacity = _nodeOpacity(node);
     if (opacity <= 0.001) return;
@@ -2086,42 +1982,28 @@ class _GraphPainter extends CustomPainter {
     final comp = (1.0 / view.scale).clamp(0.45, 1.7);
     final gap = (r * 0.24).clamp(3.0, 7.0);
     final rIcon = (r - gap).clamp(r * 0.5, r);
-
-    // Inner ring (hugs the icon disc).
     _rimPaint
       ..color = palette.inkLine.withValues(alpha: (0.85 * opacity).clamp(0.0, 1.0))
       ..strokeWidth = (isSelf ? 1.9 : 1.4) * comp;
     canvas.drawCircle(pos, rIcon, _rimPaint);
-
-    // Outer ring (the encircle).
     _rimPaint
       ..color = palette.inkLine.withValues(alpha: (0.95 * opacity).clamp(0.0, 1.0))
       ..strokeWidth = (isSelf ? 2.4 : 1.9) * comp;
     canvas.drawCircle(pos, r, _rimPaint);
   }
 
-  void _drawProfileImage(
-      Canvas canvas, ui.Image img, Offset pos, double r, double opacity) {
+  void _drawProfileImage(Canvas canvas, ui.Image img, Offset pos, double r, double opacity) {
     final rect = Rect.fromCircle(center: pos, radius: r);
     canvas.save();
-    // Clip to circle before drawing the image.
     canvas.clipPath(Path()..addOval(rect));
     final paint = Paint()..filterQuality = FilterQuality.low;
     if (opacity < 1.0) {
-      // Bake opacity into the image via a color-matrix.
       paint.colorFilter = ColorFilter.matrix([
-        1, 0, 0, 0, 0,
-        0, 1, 0, 0, 0,
-        0, 0, 1, 0, 0,
-        0, 0, 0, opacity, 0,
+        1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, opacity, 0,
       ]);
     }
-    canvas.drawImageRect(
-      img,
-      Rect.fromLTWH(0, 0, img.width.toDouble(), img.height.toDouble()),
-      rect,
-      paint,
-    );
+    canvas.drawImageRect(img,
+        Rect.fromLTWH(0, 0, img.width.toDouble(), img.height.toDouble()), rect, paint);
     canvas.restore();
   }
 
@@ -2135,5 +2017,12 @@ class _GraphPainter extends CustomPainter {
       old.highlightedIds != highlightedIds ||
       old.showEdges != showEdges ||
       old.palette != palette ||
-      old.imageVersion != imageVersion;
+      old.imageVersion != imageVersion ||
+      old.nodeOverrides != nodeOverrides ||
+      old.groups != groups ||
+      old.lassoPoints != lassoPoints ||
+      old.sortMode != sortMode ||
+      old.decoStyle != decoStyle ||
+      old.editMode != editMode ||
+      old.sortResistanceProgress != sortResistanceProgress;
 }
