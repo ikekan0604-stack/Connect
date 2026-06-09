@@ -74,6 +74,7 @@ class _SortScreenState extends State<SortScreen> {
             highlightedIds: _highlightedIds,
             showEdges: _showEdges,
             edgeLevelFilter: _levelFilter,
+            sortMode: true,
             onNodeLongPress: (user) {
               if (user.id == 'self') {
                 ProfileBottomSheet.show(context, user, isSelf: true);
@@ -93,6 +94,20 @@ class _SortScreenState extends State<SortScreen> {
             children: [
               Row(
                 children: [
+                  // Back button
+                  GestureDetector(
+                    onTap: () => Navigator.maybePop(context),
+                    child: Container(
+                      width: 30, height: 30,
+                      decoration: BoxDecoration(
+                        color: AppTheme.surface.withValues(alpha: 0.85),
+                        shape: BoxShape.circle,
+                        border: Border.all(color: AppTheme.ink.withValues(alpha: 0.22)),
+                      ),
+                      child: Icon(Icons.arrow_back_ios_new, size: 14, color: AppTheme.ink),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
                   Text(
                     'sort',
                     style: TextStyle(
@@ -100,6 +115,7 @@ class _SortScreenState extends State<SortScreen> {
                       fontSize: 13,
                       fontWeight: FontWeight.w600,
                       letterSpacing: 2.5,
+                      decoration: TextDecoration.none,
                     ),
                   ),
                   const SizedBox(width: 10),
@@ -197,6 +213,7 @@ class _MonoMiniBtn extends StatelessWidget {
             fontSize: 11,
             fontWeight: FontWeight.w600,
             letterSpacing: 0.5,
+            decoration: TextDecoration.none,
           ),
         ),
       ),
@@ -289,6 +306,7 @@ class _FilterPanel extends StatelessWidget {
                 style: TextStyle(
                   color: AppTheme.ink.withValues(alpha: 0.55),
                   fontSize: 11,
+                  decoration: TextDecoration.none,
                 ),
               ),
               const SizedBox(width: 4),
@@ -313,6 +331,7 @@ class _FilterPanel extends StatelessWidget {
                     fontSize: 11,
                     fontWeight: FontWeight.w500,
                     letterSpacing: 0.5,
+                    decoration: TextDecoration.none,
                   ),
                 ),
               ),
@@ -342,6 +361,7 @@ class _FilterRow extends StatelessWidget {
               color: AppTheme.ink.withValues(alpha: 0.45),
               fontSize: 11,
               letterSpacing: 0.3,
+              decoration: TextDecoration.none,
             ),
           ),
         ),
@@ -377,7 +397,7 @@ class _DropdownFilter extends StatelessWidget {
           value: value,
           isExpanded: true,
           dropdownColor: AppTheme.surfaceElevated,
-          style: TextStyle(color: AppTheme.ink, fontSize: 12),
+          style: TextStyle(color: AppTheme.ink, fontSize: 12, decoration: TextDecoration.none),
           icon: Icon(
             Icons.keyboard_arrow_down,
             color: AppTheme.ink.withValues(alpha: 0.5),
@@ -427,6 +447,7 @@ class _LevelChip extends StatelessWidget {
             color: selected ? Colors.white : AppTheme.ink.withValues(alpha: 0.7),
             fontSize: 10,
             fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+            decoration: TextDecoration.none,
           ),
         ),
       ),

@@ -143,7 +143,19 @@ class _MapScreenState extends State<MapScreen> {
     setState(() => _sortMode = true);
     Navigator.push(
       context,
-      MaterialPageRoute(builder: (_) => const SortScreen()),
+      PageRouteBuilder(
+        pageBuilder: (_, __, ___) => const SortScreen(),
+        transitionsBuilder: (_, anim, __, child) => FadeTransition(
+          opacity: CurvedAnimation(parent: anim, curve: Curves.easeOut),
+          child: ScaleTransition(
+            scale: Tween<double>(begin: 0.92, end: 1.0).animate(
+              CurvedAnimation(parent: anim, curve: Curves.easeOutCubic),
+            ),
+            child: child,
+          ),
+        ),
+        transitionDuration: const Duration(milliseconds: 300),
+      ),
     ).then((_) {
       if (mounted) setState(() => _sortMode = false);
     });
@@ -214,6 +226,7 @@ class _MapScreenState extends State<MapScreen> {
                   highlightedIds: _sortMode ? _sortHighlightedIds : null,
                   resetSignal: _resetSignal,
                   relayoutSignal: _relayoutSignal,
+                  bottomReserve: 72,
                 ),
               ),
 
@@ -241,10 +254,10 @@ class _MapScreenState extends State<MapScreen> {
                   child: _buildEditBadge(),
                 ),
 
-              // ── Right-side FABs ──
+              // ── Left-side FABs ──
               if (!_sortMode)
                 Positioned(
-                  right: 14,
+                  left: 14,
                   top: top + 70,
                   child: _buildFabs(),
                 ),

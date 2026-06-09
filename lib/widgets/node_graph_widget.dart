@@ -128,10 +128,9 @@ double _edgeThickness(RelationshipLevel l) {
   }
 }
 
-// Sort mode: user must pinch below this scale AND hold for _kSortResistanceDuration
-const double _kSortResistanceStart = 0.26; // resistance arc starts here
-const double _kSortTriggerScale    = 0.18; // must stay below here for hold
-const double _kSortResistanceDuration = 0.75; // seconds to hold
+// Sort mode: rubber-band pinch-out physics
+const double _kMinNormalScale    = 0.28; // pinch wall — resistance starts here
+const double _kSortSnapThreshold = 0.13; // virtualScale below this → snap to sort
 
 // ---------------- Widget ----------------
 
@@ -156,6 +155,7 @@ class NodeGraphWidget extends StatefulWidget {
   final List<Group> groups;
   final int resetSignal;
   final int relayoutSignal;
+  final double bottomReserve;
 
   const NodeGraphWidget({
     super.key,
@@ -177,6 +177,7 @@ class NodeGraphWidget extends StatefulWidget {
     this.groups = const [],
     this.resetSignal = 0,
     this.relayoutSignal = 0,
+    this.bottomReserve = 0,
   });
 
   @override
@@ -227,11 +228,9 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
   bool _isLasso = false;
   final List<Offset> _lassoScreenPoints = [];
 
-  // ---- Sort mode resistance state ----
-  bool _sortResistanceActive = false;
-  double _sortResistanceProgress = 0.0;
-  Timer? _sortResistanceTimer;
-  DateTime? _sortResistanceStartTime;
+  // ---- Sort mode rubber-band state ----
+  double _virtualScale = 1.0;
+  double _rubberBandDepth = 0.0; // 0.0 = no tension, 1.0 = snap threshold
 
   // ---- Repaint extra trigger ----
   final ValueNotifier<int> _overlayVersion = ValueNotifier(0);
@@ -260,7 +259,6 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
     activeProfileIndex.removeListener(_onPaletteChanged);
     decoStyleNotifier.removeListener(_onDecoChanged);
     _longPressTimer?.cancel();
-    _sortResistanceTimer?.cancel();
     _animCtrl.dispose();
     _animT.dispose();
     _overlayVersion.dispose();
@@ -756,6 +754,13 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
   // ---------------- Listener gestures ----------------
 
   void _handlePointerDown(PointerDownEvent e) {
+    // Ignore touches in the bottom reserve area (reserved for draggable sheet)
+    if (widget.bottomReserve > 0 &&
+        _lastSize != Size.zero &&
+        e.localPosition.dy > _lastSize.height - widget.bottomReserve) {
+      return;
+    }
+
     _pointers[e.pointer] = e.localPosition;
 
     if (_pointers.length == 1) {
@@ -767,20 +772,13 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
           _dragStartScreenPos = e.localPosition;
           _dragStartWorldPos = _nodePositionOverrides[hit.user.id] ?? Offset(hit.wx, hit.wy);
         } else {
-          // Empty space: allow pan on swipe, lasso on long-press
-          _longPressOrigin = e.localPosition;
-          _longPressTimer?.cancel();
-          _longPressTimer = Timer(_kLongPressDuration, () {
-            final pos = _longPressOrigin;
-            if (pos == null) return;
-            _longPressOrigin = null;
-            setState(() {
-              _isLasso = true;
-              _lassoScreenPoints.clear();
-              _lassoScreenPoints.add(pos);
-            });
-            _overlayVersion.value++;
+          // Empty space: immediate lasso (1-finger on empty = lasso in edit mode)
+          setState(() {
+            _isLasso = true;
+            _lassoScreenPoints.clear();
+            _lassoScreenPoints.add(e.localPosition);
           });
+          _overlayVersion.value++;
         }
       } else {
         // Normal mode: long press detection
@@ -863,13 +861,33 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
       final prev = _prevDist;
       double newScale = _view.scale;
       if (d != null && prev != null && prev > 0) {
-        newScale = (_view.scale * d / prev).clamp(0.10, 3.5);
-      }
-      // Sort mode resistance: must hold below threshold for _kSortResistanceDuration
-      _updateSortResistance(newScale);
-      // Pinch-in to exit sort mode
-      if (widget.sortMode && newScale > _kSortResistanceStart * 1.4) {
-        widget.onSortModeChanged?.call(false);
+        final ratio = d / prev;
+        _virtualScale = (_virtualScale * ratio).clamp(0.05, 3.5);
+
+        if (!widget.sortMode && _virtualScale < _kMinNormalScale) {
+          // Rubber-band resistance: displayed scale resists the pull
+          final deficit = _kMinNormalScale - _virtualScale;
+          newScale = (_kMinNormalScale - deficit * 0.32).clamp(0.10, 3.5);
+          final depth = (deficit / (_kMinNormalScale - _kSortSnapThreshold)).clamp(0.0, 1.0);
+          if ((depth - _rubberBandDepth).abs() > 0.005) {
+            setState(() => _rubberBandDepth = depth);
+            _overlayVersion.value++;
+          }
+          if (_virtualScale < _kSortSnapThreshold) {
+            // Snap to sort mode ("ぐんっ" transition)
+            _virtualScale = _kMinNormalScale;
+            setState(() => _rubberBandDepth = 0.0);
+            _overlayVersion.value++;
+            widget.onSortModeChanged?.call(true);
+            newScale = _kMinNormalScale;
+          }
+        } else {
+          newScale = _virtualScale.clamp(0.10, 3.5);
+          if (_rubberBandDepth != 0.0) {
+            setState(() => _rubberBandDepth = 0.0);
+            _overlayVersion.value++;
+          }
+        }
       }
 
       if (widget.is3D) {
@@ -936,46 +954,17 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
       if (tap && wasSinglePointer && timerStillActive && origin != null && !widget.editMode) {
         _handleTap(origin);
       }
+
+      // Snap back from rubber-band zone on release
+      if (!widget.sortMode && _virtualScale < _kMinNormalScale) {
+        _virtualScale = _kMinNormalScale;
+        _view.update(scale: _kMinNormalScale);
+        setState(() => _rubberBandDepth = 0.0);
+        _overlayVersion.value++;
+      }
     } else {
       _prevFocal = _focal();
       _prevDist = _dist();
-    }
-  }
-
-  void _updateSortResistance(double newScale) {
-    if (widget.sortMode) return;
-    if (newScale < _kSortTriggerScale) {
-      if (!_sortResistanceActive) {
-        _sortResistanceActive = true;
-        _sortResistanceStartTime = DateTime.now();
-        _sortResistanceProgress = 0.0;
-        _sortResistanceTimer?.cancel();
-        _sortResistanceTimer = Timer.periodic(
-          const Duration(milliseconds: 16),
-          (t) {
-            if (!mounted) { t.cancel(); return; }
-            final elapsed = DateTime.now()
-                .difference(_sortResistanceStartTime!)
-                .inMilliseconds;
-            final progress = (elapsed / (_kSortResistanceDuration * 1000)).clamp(0.0, 1.0);
-            setState(() => _sortResistanceProgress = progress);
-            _overlayVersion.value++;
-            if (progress >= 1.0) {
-              t.cancel();
-              _sortResistanceActive = false;
-              _sortResistanceProgress = 0.0;
-              widget.onSortModeChanged?.call(true);
-            }
-          },
-        );
-      }
-    } else {
-      if (_sortResistanceActive) {
-        _sortResistanceTimer?.cancel();
-        _sortResistanceActive = false;
-        setState(() => _sortResistanceProgress = 0.0);
-        _overlayVersion.value++;
-      }
     }
   }
 
@@ -1037,7 +1026,7 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
                 sortMode: widget.sortMode,
                 decoStyle: decoStyleNotifier.value,
                 editMode: widget.editMode,
-                sortResistanceProgress: _sortResistanceProgress,
+                rubberBandDepth: _rubberBandDepth,
               ),
             ),
           ),
@@ -1434,7 +1423,7 @@ class _GraphPainter extends CustomPainter {
   final bool sortMode;
   final DecoStyle decoStyle;
   final bool editMode;
-  final double sortResistanceProgress;
+  final double rubberBandDepth;
 
   final _fillPaint = Paint();
   final _rimPaint = Paint()
@@ -1473,7 +1462,7 @@ class _GraphPainter extends CustomPainter {
     required this.sortMode,
     required this.decoStyle,
     required this.editMode,
-    required this.sortResistanceProgress,
+    required this.rubberBandDepth,
   }) : super(repaint: Listenable.merge([view, animT]));
 
   double _nodeOpacity(_WorldNode node) {
@@ -1623,42 +1612,39 @@ class _GraphPainter extends CustomPainter {
       _drawLasso(canvas);
     }
 
-    // ---- Sort mode resistance arc ----
-    if (sortResistanceProgress > 0.0 && !sortMode) {
-      _drawResistanceArc(canvas, size);
+    // ---- Sort pull indicator (rubber-band tension visualization) ----
+    if (rubberBandDepth > 0.0 && !sortMode) {
+      _drawSortPullIndicator(canvas, size);
     }
   }
 
-  void _drawResistanceArc(Canvas canvas, Size size) {
-    const arcR = 32.0;
+  void _drawSortPullIndicator(Canvas canvas, Size size) {
     final cx = size.width / 2;
     final cy = size.height / 2;
-    // Background ring
+    final t = rubberBandDepth;
+
+    // Expanding ring that shows tension building up
+    final r = 18.0 + t * 18.0;
     canvas.drawCircle(
-        Offset(cx, cy), arcR,
-        Paint()
-          ..color = palette.ink.withValues(alpha: 0.10)
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 5.0);
-    // Progress arc
-    final rect = Rect.fromCircle(center: Offset(cx, cy), radius: arcR);
-    canvas.drawArc(
-        rect,
-        -pi / 2,
-        2 * pi * sortResistanceProgress,
-        false,
-        Paint()
-          ..color = palette.accent.withValues(alpha: 0.85)
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 5.0
-          ..strokeCap = StrokeCap.round);
-    // Icon in center
+      Offset(cx, cy), r,
+      Paint()
+        ..color = palette.accent.withValues(alpha: t * 0.14)
+        ..style = PaintingStyle.fill,
+    );
+    canvas.drawCircle(
+      Offset(cx, cy), r,
+      Paint()
+        ..color = palette.accent.withValues(alpha: 0.25 + t * 0.65)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.4 + t * 2.2,
+    );
+
     final tp = TextPainter(
       text: TextSpan(
         text: 'sort',
         style: TextStyle(
-          color: palette.ink.withValues(alpha: 0.6),
-          fontSize: 10,
+          color: palette.ink.withValues(alpha: 0.25 + t * 0.55),
+          fontSize: 9.0 + t * 3.0,
           fontWeight: FontWeight.w700,
           fontFamily: AppTheme.bodyFamily,
         ),
@@ -2024,5 +2010,5 @@ class _GraphPainter extends CustomPainter {
       old.sortMode != sortMode ||
       old.decoStyle != decoStyle ||
       old.editMode != editMode ||
-      old.sortResistanceProgress != sortResistanceProgress;
+      old.rubberBandDepth != rubberBandDepth;
 }
