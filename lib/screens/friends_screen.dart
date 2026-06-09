@@ -14,7 +14,7 @@ class FriendsScreen extends StatelessWidget {
     return Scaffold(
       backgroundColor: AppTheme.background,
       appBar: AppBar(
-        title: const Text(
+        title: Text(
           'friends',
           style: TextStyle(
             color: AppTheme.textPrimary,
@@ -29,7 +29,7 @@ class FriendsScreen extends StatelessWidget {
               padding: const EdgeInsets.only(right: 18),
               child: Text(
                 '${friends.length}',
-                style: const TextStyle(
+                style: TextStyle(
                   color: AppTheme.textSecondary,
                   fontSize: 13,
                   fontWeight: FontWeight.w500,
@@ -82,7 +82,7 @@ class _FriendRow extends StatelessWidget {
                 color: user.nodeColor,
               ),
               alignment: Alignment.center,
-              child: Text(user.emoji, style: const TextStyle(fontSize: 18)),
+              child: Text(user.emoji, style: TextStyle(fontSize: 18)),
             ),
             const SizedBox(width: 12),
             Expanded(
@@ -91,7 +91,7 @@ class _FriendRow extends StatelessWidget {
                 children: [
                   Text(
                     user.name,
-                    style: const TextStyle(
+                    style: TextStyle(
                       color: AppTheme.textPrimary,
                       fontSize: 14,
                       fontWeight: FontWeight.w500,
@@ -102,7 +102,7 @@ class _FriendRow extends StatelessWidget {
                     children: [
                       Text(
                         user.mbti,
-                        style: const TextStyle(
+                        style: TextStyle(
                           color: AppTheme.textSecondary,
                           fontSize: 11,
                           letterSpacing: 0.5,
@@ -113,7 +113,7 @@ class _FriendRow extends StatelessWidget {
                         child: Container(
                           width: 2,
                           height: 2,
-                          decoration: const BoxDecoration(
+                          decoration: BoxDecoration(
                             shape: BoxShape.circle,
                             color: AppTheme.textTertiary,
                           ),
@@ -121,7 +121,7 @@ class _FriendRow extends StatelessWidget {
                       ),
                       Text(
                         '${user.age}',
-                        style: const TextStyle(
+                        style: TextStyle(
                           color: AppTheme.textSecondary,
                           fontSize: 11,
                         ),
@@ -131,7 +131,7 @@ class _FriendRow extends StatelessWidget {
                         child: Container(
                           width: 2,
                           height: 2,
-                          decoration: const BoxDecoration(
+                          decoration: BoxDecoration(
                             shape: BoxShape.circle,
                             color: AppTheme.textTertiary,
                           ),
@@ -140,7 +140,7 @@ class _FriendRow extends StatelessWidget {
                       Flexible(
                         child: Text(
                           user.job,
-                          style: const TextStyle(
+                          style: TextStyle(
                             color: AppTheme.textSecondary,
                             fontSize: 11,
                           ),
@@ -181,7 +181,9 @@ class _LevelIndicator extends StatelessWidget {
             width: 3,
             height: 12,
             decoration: BoxDecoration(
-              color: filled ? Colors.white : Colors.white.withValues(alpha: 0.12),
+              color: filled
+                  ? AppTheme.accent
+                  : AppTheme.ink.withValues(alpha: 0.15),
               borderRadius: BorderRadius.circular(1),
             ),
           ),

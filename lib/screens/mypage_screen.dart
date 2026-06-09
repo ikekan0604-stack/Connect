@@ -111,7 +111,7 @@ class _MyPageScreenState extends State<MyPageScreen>
           labelColor: AppTheme.accent,
           unselectedLabelColor: AppTheme.textTertiary,
           labelStyle:
-              const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+              TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
           tabs: const [
             Tab(text: '詳細プロフィール'),
             Tab(text: '簡易プロフィール'),
@@ -254,7 +254,7 @@ class _SimpleProfileTab extends StatelessWidget {
             borderRadius: BorderRadius.circular(12),
             border: Border.all(color: AppTheme.ink.withValues(alpha: 0.18)),
           ),
-          child: const Column(
+          child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
@@ -306,7 +306,7 @@ class _SectionLabel extends StatelessWidget {
       ),
       child: Row(
         children: [
-          Text(icon, style: const TextStyle(fontSize: 16)),
+          Text(icon, style: TextStyle(fontSize: 16)),
           const SizedBox(width: 8),
           Expanded(
             child: Text(
@@ -344,7 +344,7 @@ class _Field extends StatelessWidget {
         children: [
           Text(
             label,
-            style: const TextStyle(
+            style: TextStyle(
                 color: AppTheme.textSecondary,
                 fontSize: 12,
                 fontWeight: FontWeight.w600),
@@ -354,7 +354,7 @@ class _Field extends StatelessWidget {
             controller: ctrl,
             maxLines: maxLines,
             keyboardType: keyboardType,
-            style: const TextStyle(color: AppTheme.ink, fontSize: 14),
+            style: TextStyle(color: AppTheme.ink, fontSize: 14),
             decoration: InputDecoration(hintText: hint),
           ),
         ],

@@ -96,13 +96,13 @@ class _Header extends StatelessWidget {
           alignment: Alignment.center,
           child: Text(
             user.emoji,
-            style: const TextStyle(fontSize: 28, color: AppTheme.ink),
+            style: TextStyle(fontSize: 28, color: AppTheme.ink),
           ),
         ),
         const SizedBox(height: 12),
         Text(
           user.name,
-          style: const TextStyle(
+          style: TextStyle(
             color: AppTheme.textPrimary,
             fontSize: 17,
             fontWeight: FontWeight.w600,
@@ -133,7 +133,7 @@ class _Header extends StatelessWidget {
               const SizedBox(width: 8),
               Text(
                 conn!.level.label,
-                style: const TextStyle(
+                style: TextStyle(
                   color: AppTheme.textSecondary,
                   fontSize: 11,
                   fontWeight: FontWeight.w500,
@@ -145,7 +145,7 @@ class _Header extends StatelessWidget {
         ],
         if (isSelf) ...[
           const SizedBox(height: 6),
-          const Text(
+          Text(
             'you',
             style: TextStyle(
               color: AppTheme.textSecondary,
@@ -219,7 +219,7 @@ class _FullProfile extends StatelessWidget {
                       ),
                       child: Text(
                         h,
-                        style: const TextStyle(
+                        style: TextStyle(
                           color: AppTheme.textPrimary,
                           fontSize: 11,
                         ),
@@ -238,7 +238,7 @@ class _FullProfile extends StatelessWidget {
               ),
               child: Row(
                 children: [
-                  const Icon(Icons.photo_library_outlined,
+                  Icon(Icons.photo_library_outlined,
                       color: AppTheme.textSecondary, size: 16),
                   const SizedBox(width: 8),
                   Text(
@@ -251,7 +251,7 @@ class _FullProfile extends StatelessWidget {
                   const Spacer(),
                   Text(
                     '${conn!.level.numericLevel * 3} 枚',
-                    style: const TextStyle(
+                    style: TextStyle(
                       color: AppTheme.textPrimary,
                       fontSize: 13,
                       fontWeight: FontWeight.w500,
@@ -341,7 +341,7 @@ class _StatCell extends StatelessWidget {
           const SizedBox(height: 4),
           Text(
             value,
-            style: const TextStyle(
+            style: TextStyle(
               color: AppTheme.textPrimary,
               fontSize: 13,
               fontWeight: FontWeight.w500,

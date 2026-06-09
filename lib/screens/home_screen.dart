@@ -4,6 +4,7 @@ import '../data/mock_data.dart';
 import '../models/user.dart';
 import '../models/connection.dart';
 import '../theme.dart';
+import '../color_profiles.dart';
 import '../widgets/node_graph_widget.dart';
 import '../widgets/profile_bottom_sheet.dart';
 
@@ -117,7 +118,7 @@ class _HomeScreenState extends State<HomeScreen> {
             children: [
               Text(
                 'CONNECT',
-                style: AppTheme.display(const TextStyle(
+                style: AppTheme.display(TextStyle(
                   color: AppTheme.textPrimary,
                   fontSize: 20,
                   fontWeight: FontWeight.w600,
@@ -252,7 +253,7 @@ class _ModeChip extends StatelessWidget {
         alignment: Alignment.center,
         child: Text(
           label,
-          style: const TextStyle(
+          style: TextStyle(
             color: AppTheme.ink,
             fontSize: 11,
             fontWeight: FontWeight.w700,
@@ -297,6 +298,18 @@ class _SettingsPanel extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
+            'カラーテーマ',
+            style: TextStyle(
+              color: AppTheme.ink.withValues(alpha: 0.45),
+              fontSize: 9,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 1.5,
+            ),
+          ),
+          const SizedBox(height: 8),
+          _ColorThemePicker(),
+          const SizedBox(height: 14),
+          Text(
             'DEBUG',
             style: TextStyle(
               color: AppTheme.ink.withValues(alpha: 0.45),
@@ -328,6 +341,86 @@ class _SettingsPanel extends StatelessWidget {
       ),
     );
   }
+}
+
+class _ColorThemePicker extends StatelessWidget {
+  // Intentionally non-const so it rebuilds (and re-reads the active index) when
+  // the colour profile changes and the settings panel rebuilds.
+  // ignore: prefer_const_constructors_in_immutables
+  _ColorThemePicker();
+
+  @override
+  Widget build(BuildContext context) {
+    final selected = activeProfileIndex.value;
+    return Wrap(
+      spacing: 7,
+      runSpacing: 7,
+      children: [
+        for (int i = 0; i < kColorProfiles.length; i++)
+          _ThemeChip(
+            profile: kColorProfiles[i],
+            isSelected: i == selected,
+            onTap: () => activeProfileIndex.value = i,
+          ),
+      ],
+    );
+  }
+}
+
+class _ThemeChip extends StatelessWidget {
+  final ColorProfile profile;
+  final bool isSelected;
+  final VoidCallback onTap;
+
+  const _ThemeChip({
+    required this.profile,
+    required this.isSelected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(6, 5, 9, 5),
+        decoration: BoxDecoration(
+          color: profile.background,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: isSelected
+                ? AppTheme.accent
+                : AppTheme.ink.withValues(alpha: 0.2),
+            width: isSelected ? 1.8 : 1.0,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Two dots previewing the profile's ink + accent on its paper.
+            _dot(profile.inkLine),
+            const SizedBox(width: 2),
+            _dot(profile.accent),
+            const SizedBox(width: 6),
+            Text(
+              profile.name,
+              style: TextStyle(
+                color: profile.textPrimary,
+                fontSize: 10,
+                fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _dot(Color c) => Container(
+        width: 9,
+        height: 9,
+        decoration: BoxDecoration(shape: BoxShape.circle, color: c),
+      );
 }
 
 class _SliderRow extends StatelessWidget {
@@ -390,7 +483,7 @@ class _SliderRow extends StatelessWidget {
           child: Text(
             valueText,
             textAlign: TextAlign.right,
-            style: const TextStyle(
+            style: TextStyle(
               color: AppTheme.textPrimary,
               fontSize: 11,
               fontWeight: FontWeight.w600,

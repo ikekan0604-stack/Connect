@@ -93,7 +93,7 @@ class _SortScreenState extends State<SortScreen> {
             children: [
               Row(
                 children: [
-                  const Text(
+                  Text(
                     'sort',
                     style: TextStyle(
                       color: AppTheme.ink,
@@ -377,7 +377,7 @@ class _DropdownFilter extends StatelessWidget {
           value: value,
           isExpanded: true,
           dropdownColor: AppTheme.surfaceElevated,
-          style: const TextStyle(color: AppTheme.ink, fontSize: 12),
+          style: TextStyle(color: AppTheme.ink, fontSize: 12),
           icon: Icon(
             Icons.keyboard_arrow_down,
             color: AppTheme.ink.withValues(alpha: 0.5),

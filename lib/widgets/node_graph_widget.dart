@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import '../models/user.dart';
 import '../models/connection.dart';
 import '../theme.dart';
+import '../color_profiles.dart';
 
 // ---------------- Data structs ----------------
 
@@ -100,19 +101,9 @@ class GraphViewState extends ChangeNotifier {
 }
 
 // ---------------- Sketchbook palette ----------------
-// A warm cream page with dark indigo ink — chic pen-illustration look, gentler
-// on the eyes than pure black-on-white. Kept local to avoid a theme import cycle.
-
-/// Near-white sketchbook paper.
-const Color _kPaper = Color(0xFFFBF9F4);
-/// Slightly warmer paper for the page's lower edge (faint gradient).
-const Color _kPaperLow = Color(0xFFF3EFE6);
-/// Soft ink for faint marks (dot grid, doodles).
-const Color _kInk = Color(0xFF2A2740);
-/// Near-black indigo used for every node ring — the unified pen-line colour.
-const Color _kInkLine = Color(0xFF201D33);
-/// Hot-but-tasteful pink accent that reads well on paper.
-const Color _kAccent = Color(0xFFE85C8A);
+// Colours come from the active ColorProfile (see color_profiles.dart) so the
+// graph re-skins with the rest of the app. The painter holds a `palette` field;
+// the State's text-painter builders take the ink colour as a parameter.
 
 /// Deterministic pseudo-random noise in [-1, 1] from an integer seed.
 /// Classic GLSL-style hash — web-safe (no 64-bit int ops).
@@ -250,6 +241,8 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
     super.initState();
     _doodles = _generateDoodles(46);
     PaintingBinding.instance.systemFonts.addListener(_onFontsLoaded);
+    // Rebuild cached ink-coloured text painters when the colour profile changes.
+    activeProfileIndex.addListener(_onPaletteChanged);
 
     _animCtrl = AnimationController(
       vsync: this,
@@ -265,6 +258,7 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
   @override
   void dispose() {
     PaintingBinding.instance.systemFonts.removeListener(_onFontsLoaded);
+    activeProfileIndex.removeListener(_onPaletteChanged);
     _longPressTimer?.cancel();
     _animCtrl.dispose();
     _animT.dispose();
@@ -277,6 +271,13 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
   }
 
   void _onFontsLoaded() {
+    if (mounted && _lastSize != Size.zero) {
+      _buildLayout(_lastSize);
+    }
+  }
+
+  void _onPaletteChanged() {
+    // Re-bake the emoji / name text painters in the new ink colour, and repaint.
     if (mounted && _lastSize != Size.zero) {
       _buildLayout(_lastSize);
     }
@@ -599,8 +600,9 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
         wy: py[i],
         wz: pz[i],
         ringDepth: ringDepths[i],
-        emojiPainter: _buildEmojiPainter(u.emoji, r),
-        namePainter: r >= 11 ? _buildNamePainter(u.name, r) : null,
+        emojiPainter: _buildEmojiPainter(u.emoji, r, activeProfile.ink),
+        namePainter:
+            r >= 11 ? _buildNamePainter(u.name, r, activeProfile.ink) : null,
       ));
     }
 
@@ -691,13 +693,13 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
     }
   }
 
-  static TextPainter _buildEmojiPainter(String emoji, double r) {
+  static TextPainter _buildEmojiPainter(String emoji, double r, Color ink) {
     return TextPainter(
       text: TextSpan(
         text: emoji,
         style: TextStyle(
           fontSize: r * 0.82,
-          color: _kInk,
+          color: ink,
           fontFamily: AppTheme.bodyFamily,
         ),
       ),
@@ -705,12 +707,12 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
     )..layout();
   }
 
-  static TextPainter _buildNamePainter(String name, double r) {
+  static TextPainter _buildNamePainter(String name, double r, Color ink) {
     return TextPainter(
       text: TextSpan(
         text: name,
         style: TextStyle(
-          color: _kInk.withValues(alpha: 0.85),
+          color: ink.withValues(alpha: 0.85),
           fontSize: r < 16 ? 8.5 : 10,
           fontWeight: FontWeight.w500,
           letterSpacing: 0.2,
@@ -974,6 +976,7 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
               imageVersion: _imageVersion,
               animFrom: _animFrom,
               animT: _animT,
+              palette: activeProfile,
             ),
           ),
         ),
@@ -1675,6 +1678,8 @@ class _GraphPainter extends CustomPainter {
   final Map<String, Offset> animFrom;
   /// Drives the recenter animation: 0 = old positions, 1 = new positions.
   final ValueNotifier<double> animT;
+  /// Active colour profile — drives every ink/paper/accent colour below.
+  final ColorProfile palette;
 
   // Cached paint objects — allocated once per painter, mutated per draw call.
   final _fillPaint = Paint();
@@ -1688,10 +1693,8 @@ class _GraphPainter extends CustomPainter {
     ..style = PaintingStyle.stroke
     ..strokeCap = StrokeCap.round
     ..strokeJoin = StrokeJoin.round;
-  // Faint ink dot for the notebook grid (drawn in world space so it pans/zooms).
-  final _gridPaint = Paint()
-    ..color = _kInk.withValues(alpha: 0.09)
-    ..strokeCap = StrokeCap.round;
+  // Faint ink dot for the notebook grid (colour set per-draw from the palette).
+  final _gridPaint = Paint()..strokeCap = StrokeCap.round;
 
   // Cached paper picture, invalidated only when size changes.
   ui.Picture? _bgPicture;
@@ -1711,6 +1714,7 @@ class _GraphPainter extends CustomPainter {
     required this.imageVersion,
     required this.animFrom,
     required this.animT,
+    required this.palette,
   }) : super(repaint: Listenable.merge([view, animT]));
 
   /// Per-node ink opacity (matches the body pass so rings line up with fills).
@@ -1823,7 +1827,7 @@ class _GraphPainter extends CustomPainter {
         }
         // Width is comp-compensated so lines don't fatten on zoom.
         _edgePaint
-          ..color = _kInk.withValues(alpha: (alpha * 1.5).clamp(0.0, 0.9))
+          ..color = palette.ink.withValues(alpha: (alpha * 1.5).clamp(0.0, 0.9))
           ..strokeWidth = width * comp;
         _drawSketchEdge(
           canvas,
@@ -1864,10 +1868,10 @@ class _GraphPainter extends CustomPainter {
       c.drawRect(
         full,
         Paint()
-          ..shader = const LinearGradient(
+          ..shader = LinearGradient(
             begin: Alignment.topCenter,
             end: Alignment.bottomCenter,
-            colors: [_kPaper, _kPaperLow],
+            colors: [palette.background, palette.paperLow],
           ).createShader(full),
       );
 
@@ -1892,7 +1896,9 @@ class _GraphPainter extends CustomPainter {
       }
     }
     // One batched call; strokeWidth = dot diameter (round cap → round dots).
-    _gridPaint.strokeWidth = 2.0;
+    _gridPaint
+      ..color = palette.ink.withValues(alpha: 0.09)
+      ..strokeWidth = 2.0;
     canvas.drawPoints(ui.PointMode.points, points, _gridPaint);
   }
 
@@ -1910,11 +1916,11 @@ class _GraphPainter extends CustomPainter {
       canvas.rotate(d.rotation);
       canvas.scale(d.size);
       if (d.kind == _DoodleKind.dot) {
-        fillP.color = _kInk.withValues(alpha: d.opacity);
+        fillP.color = palette.ink.withValues(alpha: d.opacity);
         canvas.drawPath(d.path, fillP);
       } else {
         stroke
-          ..color = _kInk.withValues(alpha: d.opacity)
+          ..color = palette.ink.withValues(alpha: d.opacity)
           ..strokeWidth = 1.5 / d.size; // ~1.5px after the scale.
         canvas.drawPath(d.path, stroke);
       }
@@ -1974,7 +1980,7 @@ class _GraphPainter extends CustomPainter {
 
     if (useConcentricLayout && !is3D && node.ringDepth >= 0) {
       // Ring-depth-based emphasis (concentric mode).
-      fill = isSelf ? _kAccent : node.user.nodeColor;
+      fill = isSelf ? palette.accent : node.user.nodeColor;
       final depth = node.ringDepth;
       if (depth <= 1) {
         globalOpacity = 1.0;
@@ -1996,7 +2002,7 @@ class _GraphPainter extends CustomPainter {
           highlightedIds == null || highlightedIds!.contains(node.user.id);
 
       if (isSelf) {
-        fill = _kAccent;
+        fill = palette.accent;
       } else if (!primary) {
         fill = _desaturate(node.user.nodeColor, 1.0);
       } else {
@@ -2026,7 +2032,7 @@ class _GraphPainter extends CustomPainter {
 
     // Opaque paper backing out to the OUTER ring, so edges running behind the
     // node never show through the (paper-coloured) gap or a translucent icon.
-    _fillPaint.color = _kPaper;
+    _fillPaint.color = palette.background;
     canvas.drawCircle(pos, r, _fillPaint);
 
     // Pastel wash filling the icon disc so the glyph/photo sits on its colour.
@@ -2083,13 +2089,13 @@ class _GraphPainter extends CustomPainter {
 
     // Inner ring (hugs the icon disc).
     _rimPaint
-      ..color = _kInkLine.withValues(alpha: (0.85 * opacity).clamp(0.0, 1.0))
+      ..color = palette.inkLine.withValues(alpha: (0.85 * opacity).clamp(0.0, 1.0))
       ..strokeWidth = (isSelf ? 1.9 : 1.4) * comp;
     canvas.drawCircle(pos, rIcon, _rimPaint);
 
     // Outer ring (the encircle).
     _rimPaint
-      ..color = _kInkLine.withValues(alpha: (0.95 * opacity).clamp(0.0, 1.0))
+      ..color = palette.inkLine.withValues(alpha: (0.95 * opacity).clamp(0.0, 1.0))
       ..strokeWidth = (isSelf ? 2.4 : 1.9) * comp;
     canvas.drawCircle(pos, r, _rimPaint);
   }
@@ -2128,5 +2134,6 @@ class _GraphPainter extends CustomPainter {
       old.fadeNonDirect != fadeNonDirect ||
       old.highlightedIds != highlightedIds ||
       old.showEdges != showEdges ||
+      old.palette != palette ||
       old.imageVersion != imageVersion;
 }

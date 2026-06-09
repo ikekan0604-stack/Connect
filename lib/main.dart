@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'theme.dart';
+import 'color_profiles.dart';
 import 'screens/home_screen.dart';
 import 'screens/friends_screen.dart';
 import 'screens/camera_screen.dart';
@@ -21,17 +22,22 @@ class ConnectApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Connect',
-      theme: AppTheme.theme,
-      debugShowCheckedModeBanner: false,
-      home: const _MainShell(),
+    // Rebuild the whole app (theme + every screen) when the colour profile
+    // changes, so a profile switch re-skins everything at once.
+    return ValueListenableBuilder<int>(
+      valueListenable: activeProfileIndex,
+      builder: (context, _, __) => MaterialApp(
+        title: 'Connect',
+        theme: AppTheme.theme,
+        debugShowCheckedModeBanner: false,
+        home: _MainShell(),
+      ),
     );
   }
 }
 
 class _MainShell extends StatefulWidget {
-  const _MainShell();
+  _MainShell();
 
   @override
   State<_MainShell> createState() => _MainShellState();
@@ -40,21 +46,23 @@ class _MainShell extends StatefulWidget {
 class _MainShellState extends State<_MainShell> {
   int _currentIndex = 0;
 
-  static const _screens = [
-    HomeScreen(),
-    FriendsScreen(),
-    CameraScreen(),
-    SortScreen(),
-    MyPageScreen(),
-  ];
-
   @override
   Widget build(BuildContext context) {
+    // Built fresh each rebuild (non-const) so screens re-read AppTheme colours
+    // when the active colour profile changes. State is preserved by position.
+    // ignore: prefer_const_constructors
+    final screens = <Widget>[
+      HomeScreen(),
+      FriendsScreen(),
+      CameraScreen(),
+      SortScreen(),
+      MyPageScreen(),
+    ];
     return Scaffold(
       backgroundColor: AppTheme.background,
       body: IndexedStack(
         index: _currentIndex,
-        children: _screens,
+        children: screens,
       ),
       bottomNavigationBar: _NavBar(
         currentIndex: _currentIndex,

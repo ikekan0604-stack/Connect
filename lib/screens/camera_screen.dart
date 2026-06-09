@@ -13,7 +13,7 @@ class CameraScreen extends StatelessWidget {
           // Simulated camera feed (dark gradient)
           Positioned.fill(
             child: Container(
-              decoration: const BoxDecoration(
+              decoration: BoxDecoration(
                 gradient: RadialGradient(
                   center: Alignment(0, -0.1),
                   radius: 0.9,
@@ -126,7 +126,7 @@ class CameraScreen extends StatelessWidget {
                         child: Container(
                           width: 58,
                           height: 58,
-                          decoration: const BoxDecoration(
+                          decoration: BoxDecoration(
                             shape: BoxShape.circle,
                             color: Colors.white,
                           ),
@@ -143,7 +143,7 @@ class CameraScreen extends StatelessWidget {
                           '残り',
                           style: TextStyle(color: Colors.white38, fontSize: 9),
                         ),
-                        const Text(
+                        Text(
                           '3',
                           style: TextStyle(
                             color: AppTheme.accent,
@@ -234,10 +234,10 @@ class _RoomMemberChip extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text(emoji, style: const TextStyle(fontSize: 14)),
+          Text(emoji, style: TextStyle(fontSize: 14)),
           const SizedBox(width: 4),
           Text(name,
-              style: const TextStyle(color: Colors.white70, fontSize: 12)),
+              style: TextStyle(color: Colors.white70, fontSize: 12)),
         ],
       ),
     );
