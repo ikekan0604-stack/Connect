@@ -13,6 +13,7 @@ import '../widgets/profile_bottom_sheet.dart';
 import '../screens/connect_flow_screen.dart';
 import '../screens/room_screen.dart';
 import '../screens/photo_collage_screen.dart';
+import '../screens/friend_detail_screen.dart';
 import '../screens/sort_screen.dart';
 
 const _mbtiOptions = [
@@ -44,6 +45,9 @@ class _MapScreenState extends State<MapScreen> {
   // Sort mode filters
   String _sortMbti = 'すべて';
   String _sortHobby = 'すべて';
+  RelationshipLevel? _sortLevel;
+  bool _sortShowAllEdges = false;
+  bool _sortPanelOpen = true;
 
   // Groups
   List<Group> _groups = [];
@@ -55,6 +59,13 @@ class _MapScreenState extends State<MapScreen> {
   double _pendingMaxDegree = 3;
   Timer? _debounceTimer;
   final _sheetCtrl = DraggableScrollableController();
+  final _graphView = GraphViewState();
+
+  // Free text labels on the map
+  List<MapTextItem> _texts = [];
+
+  // Group selected by tapping inside its hull (edit mode)
+  String? _selectedGroupId;
 
   static const _groupColors = [
     Color(0xFF6B7BFB), Color(0xFFE88B6B), Color(0xFF6BC47B),
@@ -65,26 +76,41 @@ class _MapScreenState extends State<MapScreen> {
   void dispose() {
     _debounceTimer?.cancel();
     _sheetCtrl.dispose();
+    _graphView.dispose();
     super.dispose();
   }
 
   // ---- Computed helpers ----
 
   List<String>? get _sortHighlightedIds {
-    if (_sortMbti == 'すべて' && _sortHobby == 'すべて') return null;
+    if (_sortMbti == 'すべて' && _sortHobby == 'すべて' && _sortLevel == null) {
+      return null;
+    }
     return allMockUsers.where((u) {
       if (u.id == 'self') return true;
       bool match = true;
       if (_sortMbti != 'すべて') match = match && u.mbti == _sortMbti;
       if (_sortHobby != 'すべて') match = match && u.hobbies.contains(_sortHobby);
+      if (_sortLevel != null) {
+        final conn = selfConnection(u.id);
+        match = match && conn?.level == _sortLevel;
+      }
       return match;
     }).map((u) => u.id).toList();
   }
 
+  bool get _sortShowEdges => _sortShowAllEdges || _sortLevel != null;
+
+  // Sort mode shows ALL users. Seamlessness is preserved inside
+  // NodeGraphWidget: nodes already on screen keep their positions and
+  // only the newly added ones are placed.
   ({List<User> users, List<Connection> conns}) _computeVisible(List<User> extras) {
     if (_sortMode) {
       final all = [...allMockUsers.where((u) => u.id != 'self'), ...extras];
-      return (users: all, conns: [...mockConnections, ...extraConnectionsNotifier.value]);
+      return (
+        users: all,
+        conns: [...mockConnections, ...extraConnectionsNotifier.value]
+      );
     }
     final base = [...topDirectFriends(6),
       ...pickNonDirectByCount(count: _nodeCount.round(), maxDegree: _maxDegree.round())];
@@ -103,18 +129,74 @@ class _MapScreenState extends State<MapScreen> {
 
   void _handleNodeTap(User user) {
     if (_editMode) return;
+    if (user.id == 'self') {
+      ProfileBottomSheet.show(context, user, isSelf: true);
+      return;
+    }
+    if (user.isDirect) {
+      // Direct friends: integrated profile + collage screen
+      Navigator.push(
+        context,
+        MaterialPageRoute(builder: (_) => FriendDetailScreen(user: user)),
+      );
+      return;
+    }
+    // Friends-of-friends and beyond: simple profile sheet (unchanged)
+    ProfileBottomSheet.show(context, user);
+  }
+
+  void _handleNodeLongPressAt(User user, Offset screenPos) {
+    if (_editMode) return;
+    if (user.id == 'self') {
+      ProfileBottomSheet.show(context, user, isSelf: true);
+      return;
+    }
+    if (!user.isDirect) {
+      // Indirect friends have no shared collage — show the profile sheet
+      ProfileBottomSheet.show(context, user);
+      return;
+    }
     Navigator.push(
       context,
       MaterialPageRoute(builder: (_) => PhotoCollageScreen(user: user)),
     );
   }
 
-  void _handleNodeLongPress(User user) {
-    if (user.id == 'self') {
-      ProfileBottomSheet.show(context, user, isSelf: true);
-    } else {
-      ProfileBottomSheet.show(context, user);
-    }
+  void _addTextBox() {
+    showDialog(
+      context: context,
+      builder: (ctx) => _TextEditDialog(
+        onConfirm: (text) {
+          final wx = -_graphView.pan.dx / _graphView.scale;
+          final wy = -_graphView.pan.dy / _graphView.scale;
+          setState(() {
+            _texts = [
+              ..._texts,
+              MapTextItem(
+                id: DateTime.now().millisecondsSinceEpoch.toString(),
+                text: text,
+                pos: Offset(wx, wy),
+              ),
+            ];
+          });
+        },
+      ),
+    );
+  }
+
+  void _editTextBox(MapTextItem item) {
+    showDialog(
+      context: context,
+      builder: (ctx) => _TextEditDialog(
+        initial: item.text,
+        onConfirm: (text) {
+          setState(() => item.text = text);
+        },
+        onDelete: () {
+          setState(() => _texts = _texts.where((t) => t.id != item.id).toList());
+        },
+      ),
+    );
   }
 
   void _handleLassoComplete(Set<String> ids) {
@@ -141,25 +223,10 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   void _handleSortModeChanged(bool active) {
-    if (!active || _sortMode) return;
-    setState(() => _sortMode = true);
-    Navigator.push(
-      context,
-      PageRouteBuilder(
-        pageBuilder: (_, __, ___) => const SortScreen(),
-        transitionsBuilder: (_, anim, __, child) => FadeTransition(
-          opacity: CurvedAnimation(parent: anim, curve: Curves.easeOut),
-          child: ScaleTransition(
-            scale: Tween<double>(begin: 0.92, end: 1.0).animate(
-              CurvedAnimation(parent: anim, curve: Curves.easeOutCubic),
-            ),
-            child: child,
-          ),
-        ),
-        transitionDuration: const Duration(milliseconds: 300),
-      ),
-    ).then((_) {
-      if (mounted) setState(() => _sortMode = false);
+    if (active == _sortMode) return;
+    setState(() {
+      _sortMode = active;
+      if (active) _editMode = false;
     });
   }
 
@@ -217,28 +284,60 @@ class _MapScreenState extends State<MapScreen> {
                   is3D: _is3D,
                   useConcentricLayout: false,
                   fadeNonDirect: !_sortMode,
-                  showEdges: !_sortMode,
+                  showEdges: _sortMode ? _sortShowEdges : true,
+                  edgeLevelFilter: _sortMode ? _sortLevel : null,
                   editMode: _editMode,
                   sortMode: _sortMode,
                   groups: _groups,
+                  texts: _texts,
+                  viewState: _graphView,
                   onNodeTap: _handleNodeTap,
-                  onNodeLongPress: _handleNodeLongPress,
+                  onNodeLongPress: (_) {},
+                  onNodeLongPressAt: _handleNodeLongPressAt,
                   onLassoComplete: _handleLassoComplete,
                   onSortModeChanged: _handleSortModeChanged,
+                  onGroupSelected: (id) =>
+                      setState(() => _selectedGroupId = id),
+                  onTextEdit: _editTextBox,
                   highlightedIds: _sortMode ? _sortHighlightedIds : null,
                   resetSignal: _resetSignal,
                   relayoutSignal: _relayoutSignal,
-                  bottomReserve: 72,
+                  bottomReserve: _sortMode ? 0 : 72,
                 ),
               ),
 
-              // ── Top bar ──
+              // ── Top bar (normal) / sort header ──
               Positioned(
                 top: top + 10,
                 left: 18,
                 right: 14,
-                child: _buildTopBar(),
+                child: _sortMode ? _buildSortHeader() : _buildTopBar(),
               ),
+
+              // ── Sort filter panel ──
+              if (_sortMode && _sortPanelOpen)
+                Positioned(
+                  top: top + 52,
+                  left: 18,
+                  right: 18,
+                  child: SortFilterPanel(
+                    mbtiFilter: _sortMbti,
+                    hobbyFilter: _sortHobby,
+                    levelFilter: _sortLevel,
+                    showAllEdges: _sortShowAllEdges,
+                    onMbtiChanged: (v) => setState(() => _sortMbti = v),
+                    onHobbyChanged: (v) => setState(() => _sortHobby = v),
+                    onLevelChanged: (v) => setState(() => _sortLevel = v),
+                    onShowAllEdgesChanged: (v) =>
+                        setState(() => _sortShowAllEdges = v),
+                    onClear: () => setState(() {
+                      _sortMbti = 'すべて';
+                      _sortHobby = 'すべて';
+                      _sortLevel = null;
+                      _sortShowAllEdges = false;
+                    }),
+                  ),
+                ),
 
               // ── Settings panel ──
               if (_settingsOpen && !_sortMode)
@@ -249,7 +348,7 @@ class _MapScreenState extends State<MapScreen> {
                 ),
 
               // ── Edit mode badge ──
-              if (_editMode)
+              if (_editMode && !_sortMode)
                 Positioned(
                   top: top + 58,
                   left: 18,
@@ -260,8 +359,17 @@ class _MapScreenState extends State<MapScreen> {
               if (!_sortMode)
                 Positioned(
                   left: 14,
-                  top: top + 70,
+                  top: top + 124,
                   child: _buildFabs(),
+                ),
+
+              // ── Selected group toolbar (edit mode) ──
+              if (_editMode && !_sortMode && _selectedGroupId != null)
+                Positioned(
+                  bottom: 130,
+                  left: 0,
+                  right: 0,
+                  child: Center(child: _buildGroupToolbar()),
                 ),
 
               // ── Groups list (edit mode) ──
@@ -273,18 +381,19 @@ class _MapScreenState extends State<MapScreen> {
                 ),
 
               // ── Draggable bottom sheet ──
-              DraggableScrollableSheet(
-                controller: _sheetCtrl,
-                initialChildSize: 0.08,
-                minChildSize: 0.08,
-                maxChildSize: 0.86,
-                snap: true,
-                snapSizes: const [0.08, 0.45, 0.86],
-                builder: (bctx, ctrl) => BottomPanel(
-                  scrollController: ctrl,
-                  sheetController: _sheetCtrl,
+              if (!_sortMode)
+                DraggableScrollableSheet(
+                  controller: _sheetCtrl,
+                  initialChildSize: 0.08,
+                  minChildSize: 0.08,
+                  maxChildSize: 1.0,
+                  snap: true,
+                  snapSizes: const [0.08, 0.45, 1.0],
+                  builder: (bctx, ctrl) => BottomPanel(
+                    scrollController: ctrl,
+                    sheetController: _sheetCtrl,
+                  ),
                 ),
-              ),
             ],
           );
         },
@@ -329,6 +438,62 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
+  Widget _buildSortHeader() {
+    final hits = _sortHighlightedIds;
+    return Row(
+      children: [
+        // Back to home
+        GestureDetector(
+          onTap: () => _handleSortModeChanged(false),
+          child: Container(
+            width: 30, height: 30,
+            decoration: BoxDecoration(
+              color: AppTheme.surface.withValues(alpha: 0.85),
+              shape: BoxShape.circle,
+              border: Border.all(color: AppTheme.ink.withValues(alpha: 0.22)),
+            ),
+            child: Icon(Icons.arrow_back_ios_new, size: 14, color: AppTheme.ink),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Text(
+          'sort',
+          style: TextStyle(
+            color: AppTheme.ink,
+            fontSize: 13,
+            fontWeight: FontWeight.w600,
+            letterSpacing: 2.5,
+            decoration: TextDecoration.none,
+          ),
+        ),
+        const SizedBox(width: 10),
+        if (hits != null)
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+            decoration: BoxDecoration(
+              color: AppTheme.ink.withValues(alpha: 0.08),
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: Text(
+              '${hits.length - 1} hit',
+              style: TextStyle(
+                color: AppTheme.ink.withValues(alpha: 0.8),
+                fontSize: 10,
+                letterSpacing: 0.5,
+                decoration: TextDecoration.none,
+              ),
+            ),
+          ),
+        const Spacer(),
+        SortMiniBtn(
+          label: 'filter',
+          active: _sortPanelOpen,
+          onTap: () => setState(() => _sortPanelOpen = !_sortPanelOpen),
+        ),
+      ],
+    );
+  }
+
   Widget _buildFabs() {
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -356,6 +521,13 @@ class _MapScreenState extends State<MapScreen> {
             onTap: () => setState(() => _relayoutSignal++),
             tooltip: '自動配置',
           ),
+          const SizedBox(height: 10),
+          // Add text box
+          _Fab(
+            icon: Icons.text_fields,
+            onTap: _addTextBox,
+            tooltip: 'テキスト追加',
+          ),
         ],
         const SizedBox(height: 10),
         // Room / camera
@@ -365,6 +537,77 @@ class _MapScreenState extends State<MapScreen> {
           tooltip: 'ルーム',
         ),
       ],
+    );
+  }
+
+  Widget _buildGroupToolbar() {
+    final group = _groups.where((g) => g.id == _selectedGroupId).firstOrNull;
+    if (group == null) return const SizedBox.shrink();
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      decoration: BoxDecoration(
+        color: AppTheme.surfaceElevated.withValues(alpha: 0.97),
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: group.color.withValues(alpha: 0.7), width: 1.4),
+        boxShadow: [
+          BoxShadow(
+            color: AppTheme.ink.withValues(alpha: 0.10),
+            blurRadius: 12,
+            offset: const Offset(0, 3),
+          ),
+        ],
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 10, height: 10,
+            decoration: BoxDecoration(shape: BoxShape.circle, color: group.color),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            '${group.name} · ${group.memberIds.length}人',
+            style: TextStyle(
+              color: AppTheme.textPrimary,
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Text(
+            'ドラッグで移動',
+            style: TextStyle(color: AppTheme.textTertiary, fontSize: 10),
+          ),
+          const SizedBox(width: 12),
+          GestureDetector(
+            onTap: () {
+              _deleteGroup(group.id);
+              setState(() => _selectedGroupId = null);
+            },
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+              decoration: BoxDecoration(
+                color: Colors.redAccent.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(
+                    color: Colors.redAccent.withValues(alpha: 0.6)),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: const [
+                  Icon(Icons.delete_outline, size: 13, color: Colors.redAccent),
+                  SizedBox(width: 3),
+                  Text('削除',
+                      style: TextStyle(
+                          color: Colors.redAccent,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700)),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -485,6 +728,92 @@ class _MapScreenState extends State<MapScreen> {
           ),
         ],
       ),
+    );
+  }
+}
+
+// ======= Text edit dialog =======
+
+class _TextEditDialog extends StatefulWidget {
+  final String? initial;
+  final Function(String text) onConfirm;
+  final VoidCallback? onDelete;
+
+  const _TextEditDialog({this.initial, required this.onConfirm, this.onDelete});
+
+  @override
+  State<_TextEditDialog> createState() => _TextEditDialogState();
+}
+
+class _TextEditDialogState extends State<_TextEditDialog> {
+  late final _ctrl = TextEditingController(text: widget.initial ?? '');
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final text = _ctrl.text.trim();
+    if (text.isEmpty) return;
+    widget.onConfirm(text);
+    Navigator.pop(context);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: AppTheme.surface,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      title: Text(
+        widget.initial == null ? 'テキストを追加' : 'テキストを編集',
+        style: TextStyle(
+          color: AppTheme.textPrimary,
+          fontSize: 16,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+      content: TextField(
+        controller: _ctrl,
+        autofocus: true,
+        style: TextStyle(color: AppTheme.textPrimary, fontSize: 14),
+        decoration: InputDecoration(
+          hintText: '例: 高校の友達',
+          hintStyle: TextStyle(color: AppTheme.textTertiary, fontSize: 13),
+          enabledBorder: UnderlineInputBorder(
+            borderSide: BorderSide(color: AppTheme.ink.withValues(alpha: 0.3)),
+          ),
+          focusedBorder: UnderlineInputBorder(
+            borderSide: BorderSide(color: AppTheme.accent),
+          ),
+        ),
+        onSubmitted: (_) => _submit(),
+      ),
+      actions: [
+        if (widget.onDelete != null)
+          TextButton(
+            onPressed: () {
+              widget.onDelete!();
+              Navigator.pop(context);
+            },
+            child: const Text('削除',
+                style: TextStyle(color: Colors.redAccent, fontSize: 13)),
+          ),
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: Text('キャンセル',
+              style: TextStyle(color: AppTheme.textTertiary, fontSize: 13)),
+        ),
+        TextButton(
+          onPressed: _submit,
+          child: Text('OK',
+              style: TextStyle(
+                  color: AppTheme.accent,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w700)),
+        ),
+      ],
     );
   }
 }

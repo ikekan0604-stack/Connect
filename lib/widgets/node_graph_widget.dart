@@ -128,11 +128,95 @@ double _edgeThickness(RelationshipLevel l) {
   }
 }
 
+// ---------------- Convex hull helpers (group outlines) ----------------
+
+const double _kGroupHullPad = 40.0;
+
+List<Offset> _convexHull(List<Offset> pts) {
+  if (pts.length <= 2) return List.of(pts);
+  final p = List<Offset>.of(pts)
+    ..sort((a, b) =>
+        a.dx != b.dx ? a.dx.compareTo(b.dx) : a.dy.compareTo(b.dy));
+  double cross(Offset o, Offset a, Offset b) =>
+      (a.dx - o.dx) * (b.dy - o.dy) - (a.dy - o.dy) * (b.dx - o.dx);
+  final lower = <Offset>[];
+  for (final pt in p) {
+    while (lower.length >= 2 &&
+        cross(lower[lower.length - 2], lower.last, pt) <= 0) {
+      lower.removeLast();
+    }
+    lower.add(pt);
+  }
+  final upper = <Offset>[];
+  for (final pt in p.reversed) {
+    while (upper.length >= 2 &&
+        cross(upper[upper.length - 2], upper.last, pt) <= 0) {
+      upper.removeLast();
+    }
+    upper.add(pt);
+  }
+  lower.removeLast();
+  upper.removeLast();
+  return [...lower, ...upper];
+}
+
+// Outline that hugs the hull at a constant distance `pad`,
+// with circular arcs around each vertex (no sharp corners).
+ui.Path _roundedHullPath(List<Offset> hull, double pad) {
+  final path = ui.Path();
+  if (hull.isEmpty) return path;
+  if (hull.length == 1) {
+    path.addOval(Rect.fromCircle(center: hull[0], radius: pad));
+    return path;
+  }
+  var h = hull;
+  if (h.length >= 3) {
+    double area = 0;
+    for (int i = 0; i < h.length; i++) {
+      final a = h[i], b = h[(i + 1) % h.length];
+      area += a.dx * b.dy - b.dx * a.dy;
+    }
+    if (area < 0) h = h.reversed.toList();
+  }
+  final m = h.length;
+  Offset? firstPt;
+  for (int i = 0; i < m; i++) {
+    final a = h[i], b = h[(i + 1) % m];
+    final d = b - a;
+    final len = d.distance;
+    if (len < 1e-3) continue;
+    final nOut = Offset(d.dy / len, -d.dx / len);
+    final oA = a + nOut * pad;
+    final oB = b + nOut * pad;
+    if (firstPt == null) {
+      path.moveTo(oA.dx, oA.dy);
+      firstPt = oA;
+    } else {
+      path.arcToPoint(oA, radius: Radius.circular(pad), clockwise: true);
+    }
+    path.lineTo(oB.dx, oB.dy);
+  }
+  if (firstPt != null) {
+    path.arcToPoint(firstPt, radius: Radius.circular(pad), clockwise: true);
+  }
+  path.close();
+  return path;
+}
+
+double _distToSegment(Offset p, Offset a, Offset b) {
+  final ab = b - a;
+  final len2 = ab.dx * ab.dx + ab.dy * ab.dy;
+  if (len2 < 1e-6) return (p - a).distance;
+  final t = (((p.dx - a.dx) * ab.dx + (p.dy - a.dy) * ab.dy) / len2)
+      .clamp(0.0, 1.0);
+  return (p - (a + ab * t)).distance;
+}
+
 // Sort mode: rubber-band pinch-out physics
 const double _kMinNormalScale    = 0.28; // pinch wall — resistance starts here
 const double _kSortSnapThreshold = 0.13; // virtualScale below this → snap to sort
 // Sort screen bounds
-const double _kSortFloorScale    = 0.35; // sort screen pinch-out hard limit
+const double _kSortFloorScale    = 0.25; // sort screen pinch-out hard limit
 const double _kMaxSortScale      = 1.25; // sort screen pinch-in wall
 const double _kSortExitThreshold = 2.1;  // virtualScale above this → back home
 
@@ -150,16 +234,22 @@ class NodeGraphWidget extends StatefulWidget {
   final RelationshipLevel? edgeLevelFilter;
   // Callbacks
   final Function(User) onNodeLongPress;
+  final void Function(User, Offset)? onNodeLongPressAt;
   final Function(User)? onNodeTap;
   final Function(Set<String>)? onLassoComplete;
   final Function(bool)? onSortModeChanged;
+  final void Function(String?)? onGroupSelected;
+  final void Function(MapTextItem)? onTextEdit;
   // Edit / visual modes
   final bool editMode;
   final bool sortMode;
   final List<Group> groups;
+  final List<MapTextItem> texts;
   final int resetSignal;
   final int relayoutSignal;
   final double bottomReserve;
+  // Optional external view state (lets the host screen read pan/scale)
+  final GraphViewState? viewState;
 
   const NodeGraphWidget({
     super.key,
@@ -173,15 +263,20 @@ class NodeGraphWidget extends StatefulWidget {
     this.showEdges = true,
     this.edgeLevelFilter,
     required this.onNodeLongPress,
+    this.onNodeLongPressAt,
     this.onNodeTap,
     this.onLassoComplete,
     this.onSortModeChanged,
+    this.onGroupSelected,
+    this.onTextEdit,
     this.editMode = false,
     this.sortMode = false,
     this.groups = const [],
+    this.texts = const [],
     this.resetSignal = 0,
     this.relayoutSignal = 0,
     this.bottomReserve = 0,
+    this.viewState,
   });
 
   @override
@@ -196,7 +291,7 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
   List<_WorldNode> _worldNodes = const [];
   List<_WorldEdge> _worldEdges = const [];
 
-  final GraphViewState _view = GraphViewState();
+  late final GraphViewState _view = widget.viewState ?? GraphViewState();
   Size _lastSize = Size.zero;
   final Map<String, ui.Image> _profileImages = {};
   int _imageVersion = 0;
@@ -228,12 +323,25 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
   Offset? _dragStartWorldPos;
   final Map<String, Offset> _nodePositionOverrides = {};
 
+  // ---- Group selection / drag state ----
+  String? _selectedGroupId;
+  String? _draggingGroupId;
+  Map<String, Offset> _groupDragStartPos = {};
+
+  // ---- Text drag state ----
+  String? _draggingTextId;
+  Offset? _textDragStartPos;
+
   // ---- Lasso state ----
   bool _isLasso = false;
   final List<Offset> _lassoScreenPoints = [];
 
   // ---- Sort mode rubber-band state ----
   double _virtualScale = 1.0;
+
+  // When the sort mode toggles, keep existing node positions and only
+  // place the newly added nodes (seamless transition).
+  bool _preservePositionsNext = false;
 
   // ---- Repaint extra trigger ----
   final ValueNotifier<int> _overlayVersion = ValueNotifier(0);
@@ -267,7 +375,7 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
     _overlayVersion.dispose();
     _disposeNodeList(_worldNodes);
     for (final img in _profileImages.values) img.dispose();
-    _view.dispose();
+    if (widget.viewState == null) _view.dispose();
     super.dispose();
   }
 
@@ -302,8 +410,8 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
 
   void _handleTap(Offset pos) {
     final hit = _hitTest(pos);
-    // Single tap → photo collage callback
-    if (widget.onNodeTap != null && hit != null && hit.user.id != 'self') {
+    // Single tap → profile callback (any node, including self)
+    if (widget.onNodeTap != null && hit != null) {
       widget.onNodeTap!(hit.user);
       return;
     }
@@ -331,6 +439,11 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
   @override
   void didUpdateWidget(NodeGraphWidget old) {
     super.didUpdateWidget(old);
+    if (old.sortMode != widget.sortMode) _preservePositionsNext = true;
+    if (_selectedGroupId != null &&
+        !widget.groups.any((g) => g.id == _selectedGroupId)) {
+      _selectedGroupId = null;
+    }
     if (_lastSize != Size.zero) {
       final pSig = _computePositionSig();
       final eSig = _computeEdgeSig();
@@ -524,6 +637,46 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
       px = r.$1; py = r.$2; pz = List<double>.filled(n, 0);
     }
 
+    // Seamless sort transition: nodes that were already on screen keep
+    // their world positions; only newly appearing nodes get placed.
+    if (_preservePositionsNext && !widget.is3D && _worldNodes.isNotEmpty) {
+      final prev = {
+        for (final wn in _worldNodes) wn.user.id: Offset(wn.wx, wn.wy)
+      };
+      final placed = <Offset>[];
+      final newIdxs = <int>[];
+      for (int i = 0; i < n; i++) {
+        final p = prev[ordered[i].id];
+        if (p != null) {
+          px[i] = p.dx;
+          py[i] = p.dy;
+          placed.add(p);
+        } else {
+          newIdxs.add(i);
+        }
+      }
+      double maxR = 220;
+      for (final p in placed) maxR = max(maxR, p.distance);
+      final rng = Random(31);
+      for (final i in newIdxs) {
+        Offset cand = Offset.zero;
+        for (int attempt = 0; attempt < 90; attempt++) {
+          final rr = maxR * (0.3 + rng.nextDouble() * 1.15);
+          final th = rng.nextDouble() * 2 * pi;
+          cand = Offset(rr * cos(th), rr * sin(th));
+          bool ok = true;
+          for (final p in placed) {
+            if ((cand - p).distance < 64) { ok = false; break; }
+          }
+          if (ok) break;
+        }
+        px[i] = cand.dx;
+        py[i] = cand.dy;
+        placed.add(cand);
+      }
+    }
+    _preservePositionsNext = false;
+
     // Apply manual position overrides (from drag)
     for (int i = 0; i < n; i++) {
       final id = ordered[i].id;
@@ -712,6 +865,81 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
     return best;
   }
 
+  // ---------------- Group / text hit tests ----------------
+
+  Offset _toPainterPos(Offset screenPos) {
+    final cx = _lastSize.width / 2;
+    final cy = _lastSize.height / 2;
+    return Offset(
+      (screenPos.dx - cx - _view.pan.dx) / _view.scale + cx,
+      (screenPos.dy - cy - _view.pan.dy) / _view.scale + cy,
+    );
+  }
+
+  String? _hitTestGroup(Offset tapScreenPos) {
+    if (widget.is3D || _worldNodes.isEmpty || _lastSize == Size.zero) {
+      return null;
+    }
+    final cx = _lastSize.width / 2;
+    final cy = _lastSize.height / 2;
+    final p = _toPainterPos(tapScreenPos);
+    for (final group in widget.groups) {
+      final pts = <Offset>[];
+      for (final wn in _worldNodes) {
+        if (!group.memberIds.contains(wn.user.id)) continue;
+        final wx = _nodePositionOverrides[wn.user.id]?.dx ?? wn.wx;
+        final wy = _nodePositionOverrides[wn.user.id]?.dy ?? wn.wy;
+        pts.add(Offset(cx + wx, cy + wy));
+      }
+      if (pts.isEmpty) continue;
+      final hull = _convexHull(pts);
+      bool inside = hull.length >= 3 && _isPointInPolygon(p, hull);
+      if (!inside) {
+        double dMin = double.infinity;
+        if (hull.length == 1) {
+          dMin = (p - hull[0]).distance;
+        } else {
+          for (int i = 0; i < hull.length; i++) {
+            dMin = min(dMin,
+                _distToSegment(p, hull[i], hull[(i + 1) % hull.length]));
+          }
+        }
+        inside = dMin <= _kGroupHullPad;
+      }
+      if (inside) return group.id;
+    }
+    return null;
+  }
+
+  MapTextItem? _hitTestText(Offset tapScreenPos) {
+    if (widget.texts.isEmpty || _lastSize == Size.zero) return null;
+    final cx = _lastSize.width / 2;
+    final cy = _lastSize.height / 2;
+    final p = _toPainterPos(tapScreenPos);
+    for (final t in widget.texts) {
+      final tp = TextPainter(
+        text: TextSpan(text: t.text, style: _mapTextStyle(activeProfile.ink)),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      final rect = Rect.fromCenter(
+        center: Offset(cx + t.pos.dx, cy + t.pos.dy),
+        width: tp.width + 20,
+        height: tp.height + 16,
+      );
+      tp.dispose();
+      if (rect.contains(p)) return t;
+    }
+    return null;
+  }
+
+  static TextStyle _mapTextStyle(Color ink) => TextStyle(
+        color: ink.withValues(alpha: 0.9),
+        fontSize: 15,
+        fontWeight: FontWeight.w600,
+        letterSpacing: 0.3,
+        fontFamily: AppTheme.bodyFamily,
+      );
+
   // ---------------- Lasso helpers ----------------
 
   bool _isPointInPolygon(Offset point, List<Offset> polygon) {
@@ -774,14 +1002,59 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
           _draggingNodeId = hit.user.id;
           _dragStartScreenPos = e.localPosition;
           _dragStartWorldPos = _nodePositionOverrides[hit.user.id] ?? Offset(hit.wx, hit.wy);
+        } else if (hit == null) {
+          final textHit = _hitTestText(e.localPosition);
+          if (textHit != null) {
+            // Drag the text; long-press opens the edit dialog
+            _draggingTextId = textHit.id;
+            _dragStartScreenPos = e.localPosition;
+            _textDragStartPos = textHit.pos;
+            _longPressOrigin = e.localPosition;
+            _longPressTimer?.cancel();
+            _longPressTimer = Timer(_kLongPressDuration, () {
+              if (_longPressOrigin == null) return;
+              _longPressOrigin = null;
+              _draggingTextId = null;
+              widget.onTextEdit?.call(textHit);
+            });
+          } else {
+            final groupHit = _hitTestGroup(e.localPosition);
+            if (groupHit != null) {
+              // Select the group and prepare to drag all its members
+              _draggingGroupId = groupHit;
+              _dragStartScreenPos = e.localPosition;
+              _groupDragStartPos = {};
+              final group =
+                  widget.groups.firstWhere((g) => g.id == groupHit);
+              for (final wn in _worldNodes) {
+                if (group.memberIds.contains(wn.user.id)) {
+                  _groupDragStartPos[wn.user.id] =
+                      _nodePositionOverrides[wn.user.id] ??
+                          Offset(wn.wx, wn.wy);
+                }
+              }
+              if (_selectedGroupId != groupHit) {
+                setState(() => _selectedGroupId = groupHit);
+                _overlayVersion.value++;
+                widget.onGroupSelected?.call(groupHit);
+              }
+            } else {
+              // Empty space: deselect group, start lasso
+              if (_selectedGroupId != null) {
+                setState(() => _selectedGroupId = null);
+                _overlayVersion.value++;
+                widget.onGroupSelected?.call(null);
+              }
+              setState(() {
+                _isLasso = true;
+                _lassoScreenPoints.clear();
+                _lassoScreenPoints.add(e.localPosition);
+              });
+              _overlayVersion.value++;
+            }
+          }
         } else {
-          // Empty space: immediate lasso (1-finger on empty = lasso in edit mode)
-          setState(() {
-            _isLasso = true;
-            _lassoScreenPoints.clear();
-            _lassoScreenPoints.add(e.localPosition);
-          });
-          _overlayVersion.value++;
+          // Self node: not draggable, start lasso from here is odd — ignore
         }
       } else {
         // Normal mode: long press detection
@@ -791,7 +1064,13 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
           final pos = _longPressOrigin;
           if (pos == null) return;
           final hit = _hitTest(pos);
-          if (hit != null) widget.onNodeLongPress(hit.user);
+          if (hit != null) {
+            if (widget.onNodeLongPressAt != null) {
+              widget.onNodeLongPressAt!(hit.user, pos);
+            } else {
+              widget.onNodeLongPress(hit.user);
+            }
+          }
           _longPressOrigin = null;
         });
       }
@@ -806,6 +1085,8 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
         _overlayVersion.value++;
       }
       _draggingNodeId = null;
+      _draggingTextId = null;
+      _draggingGroupId = null;
       _baseScale = _view.scale;
       _virtualScale = _view.scale;
     }
@@ -824,7 +1105,7 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
       _longPressOrigin = null;
     }
 
-    // ---- Edit mode: drag node / lasso / pan ----
+    // ---- Edit mode: drag node / text / group / lasso ----
     if (widget.editMode && !widget.is3D && _pointers.length == 1) {
       if (_draggingNodeId != null) {
         final delta = e.localPosition - _dragStartScreenPos!;
@@ -835,12 +1116,35 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
         _overlayVersion.value++;
         return;
       }
+      if (_draggingTextId != null) {
+        final delta = e.localPosition - _dragStartScreenPos!;
+        final worldDelta = Offset(delta.dx / _view.scale, delta.dy / _view.scale);
+        for (final t in widget.texts) {
+          if (t.id == _draggingTextId) {
+            t.pos = _textDragStartPos! + worldDelta;
+            break;
+          }
+        }
+        _overlayVersion.value++;
+        return;
+      }
+      if (_draggingGroupId != null) {
+        final delta = e.localPosition - _dragStartScreenPos!;
+        final worldDelta = Offset(delta.dx / _view.scale, delta.dy / _view.scale);
+        setState(() {
+          _groupDragStartPos.forEach((id, start) {
+            _nodePositionOverrides[id] = start + worldDelta;
+          });
+        });
+        _overlayVersion.value++;
+        return;
+      }
       if (_isLasso) {
         setState(() => _lassoScreenPoints.add(e.localPosition));
         _overlayVersion.value++;
         return;
       }
-      // Empty space swipe = pan (fall through to normal pan logic below)
+      // Fall through to normal pan logic below
     }
 
     final focal = _focal();
@@ -952,6 +1256,10 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
         _dragStartScreenPos = null;
         _dragStartWorldPos = null;
       }
+      _draggingTextId = null;
+      _textDragStartPos = null;
+      _draggingGroupId = null;
+      _groupDragStartPos = {};
 
       // Reset lasso state if not finishing
       if (_isLasso && _lassoScreenPoints.length <= 3) {
@@ -1035,6 +1343,8 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
                 palette: activeProfile,
                 nodeOverrides: Map.unmodifiable(_nodePositionOverrides),
                 groups: widget.groups,
+                selectedGroupId: _selectedGroupId,
+                texts: widget.texts,
                 lassoPoints: List.unmodifiable(_lassoScreenPoints),
                 sortMode: widget.sortMode,
                 decoStyle: decoStyleNotifier.value,
@@ -1431,6 +1741,8 @@ class _GraphPainter extends CustomPainter {
   // New fields
   final Map<String, Offset> nodeOverrides;
   final List<Group> groups;
+  final String? selectedGroupId;
+  final List<MapTextItem> texts;
   final List<Offset> lassoPoints;
   final bool sortMode;
   final DecoStyle decoStyle;
@@ -1469,6 +1781,8 @@ class _GraphPainter extends CustomPainter {
     required this.palette,
     required this.nodeOverrides,
     required this.groups,
+    required this.selectedGroupId,
+    required this.texts,
     required this.lassoPoints,
     required this.sortMode,
     required this.decoStyle,
@@ -1568,9 +1882,10 @@ class _GraphPainter extends CustomPainter {
       }
     }
 
-    // ---- Group circles (draw before nodes) ----
+    // ---- Group hulls (draw before nodes) ----
     if (!sortMode) {
       _drawGroups(canvas, posList, idToIdx);
+      _drawTexts(canvas, cx, cy);
     }
 
     // ---- Edges ----
@@ -1620,7 +1935,7 @@ class _GraphPainter extends CustomPainter {
 
   }
 
-  // ---- Group shapes: axis-aligned rounded rectangles ----
+  // ---- Group shapes: rounded convex hulls hugging the members ----
 
   void _drawGroups(Canvas canvas, List<Offset> posList, Map<String, int> idToIdx) {
     for (final group in groups) {
@@ -1630,29 +1945,27 @@ class _GraphPainter extends CustomPainter {
           .toList();
       if (memberPos.isEmpty) continue;
 
-      double minX = memberPos.first.dx, maxX = memberPos.first.dx;
-      double minY = memberPos.first.dy, maxY = memberPos.first.dy;
+      final hull = _convexHull(memberPos);
+      final path = _roundedHullPath(hull, _kGroupHullPad);
+      final selected = group.id == selectedGroupId;
+
+      canvas.drawPath(
+          path,
+          Paint()
+            ..color = group.color.withValues(alpha: selected ? 0.16 : 0.09));
+      canvas.drawPath(
+          path,
+          Paint()
+            ..color = group.color.withValues(alpha: selected ? 0.95 : 0.50)
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = selected ? 2.6 : 1.6);
+
+      // Label above the hull's top-left
+      double minX = memberPos.first.dx, minY = memberPos.first.dy;
       for (final p in memberPos) {
         if (p.dx < minX) minX = p.dx;
-        if (p.dx > maxX) maxX = p.dx;
         if (p.dy < minY) minY = p.dy;
-        if (p.dy > maxY) maxY = p.dy;
       }
-      const pad = 42.0;
-      const cornerR = 20.0;
-      final rect = Rect.fromLTRB(minX - pad, minY - pad, maxX + pad, maxY + pad);
-      final rrect = RRect.fromRectAndRadius(rect, const Radius.circular(cornerR));
-
-      // Fill
-      canvas.drawRRect(rrect, Paint()..color = group.color.withValues(alpha: 0.09));
-      // Border (dashed look via two paints)
-      canvas.drawRRect(rrect,
-          Paint()
-            ..color = group.color.withValues(alpha: 0.50)
-            ..style = PaintingStyle.stroke
-            ..strokeWidth = 1.6);
-
-      // Label — top-left of the box
       final tp = TextPainter(
         text: TextSpan(
           text: group.name,
@@ -1665,7 +1978,43 @@ class _GraphPainter extends CustomPainter {
         ),
         textDirection: TextDirection.ltr,
       )..layout();
-      tp.paint(canvas, Offset(minX - pad + 8, minY - pad - tp.height - 4));
+      tp.paint(canvas,
+          Offset(minX - _kGroupHullPad + 8, minY - _kGroupHullPad - tp.height - 4));
+      tp.dispose();
+    }
+  }
+
+  // ---- Free text labels ----
+
+  void _drawTexts(Canvas canvas, double cx, double cy) {
+    for (final t in texts) {
+      final tp = TextPainter(
+        text: TextSpan(
+          text: t.text,
+          style: TextStyle(
+            color: palette.ink.withValues(alpha: 0.9),
+            fontSize: 15,
+            fontWeight: FontWeight.w600,
+            letterSpacing: 0.3,
+            fontFamily: AppTheme.bodyFamily,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      final topLeft =
+          Offset(cx + t.pos.dx - tp.width / 2, cy + t.pos.dy - tp.height / 2);
+      if (editMode) {
+        // Dashed-ish frame so it reads as a draggable object
+        final rect = Rect.fromLTWH(topLeft.dx - 8, topLeft.dy - 6,
+            tp.width + 16, tp.height + 12);
+        canvas.drawRRect(
+            RRect.fromRectAndRadius(rect, const Radius.circular(8)),
+            Paint()
+              ..color = palette.accent.withValues(alpha: 0.45)
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 1.2);
+      }
+      tp.paint(canvas, topLeft);
       tp.dispose();
     }
   }
@@ -1953,6 +2302,8 @@ class _GraphPainter extends CustomPainter {
       old.imageVersion != imageVersion ||
       old.nodeOverrides != nodeOverrides ||
       old.groups != groups ||
+      old.selectedGroupId != selectedGroupId ||
+      old.texts != texts ||
       old.lassoPoints != lassoPoints ||
       old.sortMode != sortMode ||
       old.decoStyle != decoStyle ||

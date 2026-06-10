@@ -24,6 +24,48 @@ final decoStyleNotifier = ValueNotifier<DecoStyle>(DecoStyle.sketchbook);
 // Counter for refreshing the node graph on connection change
 final graphVersionNotifier = ValueNotifier<int>(0);
 
+// Free-floating text label placed on the map in edit mode.
+// pos is in world coordinates (relative to canvas center).
+class MapTextItem {
+  final String id;
+  String text;
+  Offset pos;
+  MapTextItem({required this.id, required this.text, required this.pos});
+}
+
+// ---------------- Collage design (per friend) ----------------
+
+class CollageTextItem {
+  final String id;
+  String text;
+  Offset pos; // canvas coords, origin = center
+  Color color;
+  CollageTextItem({
+    required this.id,
+    required this.text,
+    required this.pos,
+    required this.color,
+  });
+}
+
+class CollageStroke {
+  final Color color;
+  final double width;
+  final List<Offset> points; // canvas coords
+  CollageStroke({required this.color, required this.width, required this.points});
+}
+
+class CollageDesign {
+  final Map<String, Offset> photoPos = {};
+  final Map<String, double> photoSize = {};
+  final List<CollageTextItem> texts = [];
+  final List<CollageStroke> strokes = [];
+  Color? bgColor; // null = default paper gradient
+}
+
+// In-memory store of collage edits, keyed by friend user id
+final collageDesigns = <String, CollageDesign>{};
+
 void addMockConnection(User newUser, Connection conn) {
   extraUsersNotifier.value = [...extraUsersNotifier.value, newUser];
   extraConnectionsNotifier.value = [...extraConnectionsNotifier.value, conn];

@@ -1,10 +1,11 @@
+import 'dart:math';
 import 'package:flutter/material.dart';
 import '../theme.dart';
 import '../data/mock_data.dart';
 import '../models/user.dart';
 import '../models/connection.dart';
 import '../app_state.dart';
-import '../screens/photo_collage_screen.dart';
+import '../screens/friend_detail_screen.dart';
 import 'profile_bottom_sheet.dart';
 
 class BottomPanel extends StatefulWidget {
@@ -25,7 +26,7 @@ class _BottomPanelState extends State<BottomPanel>
     with SingleTickerProviderStateMixin {
   late TabController _tabCtrl;
 
-  static const _snapSizes = [0.08, 0.45, 0.86];
+  static const _snapSizes = [0.08, 0.45, 1.0];
 
   @override
   void initState() {
@@ -97,6 +98,18 @@ class _BottomPanelState extends State<BottomPanel>
       ),
       child: Column(
         children: [
+          // Safe-area spacer that grows as the sheet approaches full screen
+          if (widget.sheetController != null)
+            AnimatedBuilder(
+              animation: widget.sheetController!,
+              builder: (ctx, _) {
+                final c = widget.sheetController!;
+                double t = 0;
+                if (c.isAttached) t = ((c.size - 0.9) / 0.1).clamp(0.0, 1.0);
+                return SizedBox(height: MediaQuery.of(ctx).padding.top * t);
+              },
+            ),
+
           // Handle bar + tab bar: manually draggable region
           GestureDetector(
             behavior: HitTestBehavior.opaque,
@@ -182,7 +195,7 @@ class _FriendsTab extends StatelessWidget {
               Navigator.push(
                 context,
                 MaterialPageRoute(
-                  builder: (_) => PhotoCollageScreen(user: friends[i]),
+                  builder: (_) => FriendDetailScreen(user: friends[i]),
                 ),
               );
             },
@@ -479,104 +492,344 @@ class _Field extends StatelessWidget {
   }
 }
 
-// ======= Timeline Tab =======
+// ======= Timeline Tab (BeReal-style photo feed) =======
 
-class _TimelineTab extends StatelessWidget {
+class _FeedComment {
+  final String name;
+  final String text;
+  const _FeedComment(this.name, this.text);
+}
+
+class _FeedPost {
+  final User user;
+  final String imageUrl;
+  final DateTime takenAt;
+  int likes;
+  bool liked;
+  final List<_FeedComment> comments;
+
+  _FeedPost({
+    required this.user,
+    required this.imageUrl,
+    required this.takenAt,
+    required this.likes,
+    this.liked = false,
+    required this.comments,
+  });
+}
+
+class _TimelineTab extends StatefulWidget {
   final ScrollController scrollController;
   const _TimelineTab({required this.scrollController});
 
-  static final _dummyEvents = [
-    _TimelineEvent(
-        emoji: '✦', text: '田中 勇樹 と撮影しました', time: '2時間前', accent: true),
-    _TimelineEvent(emoji: '🌟', text: '山田 咲 とコネクトしました', time: '昨日'),
-    _TimelineEvent(emoji: '📸', text: '渡辺 蓮 と写真を撮りました', time: '3日前'),
-    _TimelineEvent(emoji: '🔗', text: '佐藤 寛 とコネクトしました', time: '1週間前'),
-    _TimelineEvent(emoji: '📸', text: '伊藤 美咲 と写真を撮りました', time: '2週間前'),
-  ];
+  @override
+  State<_TimelineTab> createState() => _TimelineTabState();
+}
+
+class _TimelineTabState extends State<_TimelineTab> {
+  late final List<_FeedPost> _posts = _buildPosts();
+
+  List<_FeedPost> _buildPosts() {
+    final rng = Random(11);
+    const commentPool = [
+      'いいね！', 'たのしそう〜', 'いまどこ？', 'かわいい💕',
+      'また行こうね', 'うらやま…', 'いい写真！', 'なにこれww',
+    ];
+    final friends = directFriendsSorted;
+    final posts = <_FeedPost>[];
+    for (int i = 0; i < friends.length; i++) {
+      final f = friends[i];
+      final minutesAgo = 20 + rng.nextInt(60) + i * (90 + rng.nextInt(600));
+      final nComments = rng.nextInt(3);
+      final comments = <_FeedComment>[];
+      for (int c = 0; c < nComments; c++) {
+        final other = friends[rng.nextInt(friends.length)];
+        comments.add(_FeedComment(
+            other.name, commentPool[rng.nextInt(commentPool.length)]));
+      }
+      posts.add(_FeedPost(
+        user: f,
+        imageUrl: 'https://picsum.photos/seed/feed-${f.id}/600/740',
+        takenAt: DateTime.now().subtract(Duration(minutes: minutesAgo)),
+        likes: 2 + rng.nextInt(38),
+        comments: comments,
+      ));
+    }
+    // Most recently active first
+    posts.sort((a, b) => b.takenAt.compareTo(a.takenAt));
+    return posts;
+  }
 
   @override
   Widget build(BuildContext context) {
-    return ListView(
-      controller: scrollController,
+    return ListView.builder(
+      controller: widget.scrollController,
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 40),
-      children: [
-        // Placeholder notice
-        Container(
-          margin: const EdgeInsets.only(bottom: 16),
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            color: AppTheme.accent.withValues(alpha: 0.08),
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(color: AppTheme.accent.withValues(alpha: 0.3)),
-          ),
-          child: Row(
-            children: [
-              Icon(Icons.info_outline, size: 14, color: AppTheme.accent),
-              const SizedBox(width: 8),
-              Text(
-                'タイムラインはサンプルデータです',
-                style: TextStyle(color: AppTheme.accent, fontSize: 11),
-              ),
-            ],
-          ),
-        ),
-        ..._dummyEvents.map((e) => _EventTile(event: e)),
-      ],
+      itemCount: _posts.length,
+      itemBuilder: (_, i) => _PostCard(post: _posts[i]),
     );
   }
 }
 
-class _TimelineEvent {
-  final String emoji;
-  final String text;
-  final String time;
-  final bool accent;
+class _PostCard extends StatefulWidget {
+  final _FeedPost post;
+  const _PostCard({required this.post});
 
-  const _TimelineEvent({
-    required this.emoji,
-    required this.text,
-    required this.time,
-    this.accent = false,
-  });
+  @override
+  State<_PostCard> createState() => _PostCardState();
 }
 
-class _EventTile extends StatelessWidget {
-  final _TimelineEvent event;
-  const _EventTile({required this.event});
+class _PostCardState extends State<_PostCard> {
+  final _commentCtrl = TextEditingController();
+  bool _commentOpen = false;
+
+  @override
+  void dispose() {
+    _commentCtrl.dispose();
+    super.dispose();
+  }
+
+  void _toggleLike() {
+    setState(() {
+      widget.post.liked = !widget.post.liked;
+      widget.post.likes += widget.post.liked ? 1 : -1;
+    });
+  }
+
+  void _submitComment() {
+    final text = _commentCtrl.text.trim();
+    if (text.isEmpty) return;
+    setState(() {
+      widget.post.comments.add(_FeedComment('自分', text));
+      _commentCtrl.clear();
+    });
+  }
+
+  static String _timeAgo(DateTime dt) {
+    final d = DateTime.now().difference(dt);
+    if (d.inMinutes < 60) return '${d.inMinutes}分前';
+    if (d.inHours < 24) return '${d.inHours}時間前';
+    return '${d.inDays}日前';
+  }
 
   @override
   Widget build(BuildContext context) {
+    final post = widget.post;
     return Container(
-      margin: const EdgeInsets.symmetric(vertical: 4),
-      padding: const EdgeInsets.all(12),
+      margin: const EdgeInsets.only(bottom: 18),
       decoration: BoxDecoration(
-        color: event.accent
-            ? AppTheme.accent.withValues(alpha: 0.06)
-            : AppTheme.background,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-          color: event.accent
-              ? AppTheme.accent.withValues(alpha: 0.25)
-              : AppTheme.ink.withValues(alpha: 0.07),
-        ),
+        color: AppTheme.background,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppTheme.ink.withValues(alpha: 0.08)),
       ),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(event.emoji, style: const TextStyle(fontSize: 20)),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Text(
-              event.text,
-              style: TextStyle(
-                color: AppTheme.textPrimary,
-                fontSize: 13,
+          // ── Header: avatar + name + time ──
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
+            child: Row(
+              children: [
+                Container(
+                  width: 34, height: 34,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: post.user.nodeColor.withValues(alpha: 0.3),
+                    border: Border.all(
+                        color: post.user.nodeColor.withValues(alpha: 0.7),
+                        width: 1.5),
+                  ),
+                  alignment: Alignment.center,
+                  child: Text(post.user.emoji,
+                      style: const TextStyle(fontSize: 14)),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    post.user.name,
+                    style: TextStyle(
+                      color: AppTheme.textPrimary,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+                Text(
+                  _timeAgo(post.takenAt),
+                  style: TextStyle(color: AppTheme.textTertiary, fontSize: 11),
+                ),
+              ],
+            ),
+          ),
+
+          // ── Photo ──
+          ClipRRect(
+            borderRadius: BorderRadius.circular(12),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(12),
+                child: AspectRatio(
+                  aspectRatio: 4 / 5,
+                  child: Image.network(
+                    post.imageUrl,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => Container(
+                      color: post.user.nodeColor.withValues(alpha: 0.15),
+                      alignment: Alignment.center,
+                      child: Icon(Icons.image_outlined,
+                          size: 36,
+                          color: AppTheme.ink.withValues(alpha: 0.3)),
+                    ),
+                    loadingBuilder: (_, child, progress) =>
+                        progress == null
+                            ? child
+                            : Container(
+                                color: AppTheme.ink.withValues(alpha: 0.04),
+                              ),
+                  ),
+                ),
               ),
             ),
           ),
-          Text(
-            event.time,
-            style: TextStyle(color: AppTheme.textTertiary, fontSize: 11),
+
+          // ── Actions: like / comment ──
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 8, 14, 4),
+            child: Row(
+              children: [
+                GestureDetector(
+                  onTap: _toggleLike,
+                  child: Icon(
+                    post.liked ? Icons.favorite : Icons.favorite_border,
+                    size: 22,
+                    color: post.liked
+                        ? AppTheme.accent
+                        : AppTheme.ink.withValues(alpha: 0.55),
+                  ),
+                ),
+                const SizedBox(width: 5),
+                Text(
+                  '${post.likes}',
+                  style: TextStyle(
+                    color: AppTheme.textSecondary,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(width: 16),
+                GestureDetector(
+                  onTap: () => setState(() => _commentOpen = !_commentOpen),
+                  child: Icon(
+                    Icons.chat_bubble_outline,
+                    size: 20,
+                    color: AppTheme.ink.withValues(alpha: 0.55),
+                  ),
+                ),
+                const SizedBox(width: 5),
+                Text(
+                  '${post.comments.length}',
+                  style: TextStyle(
+                    color: AppTheme.textSecondary,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
           ),
+
+          // ── Comments ──
+          if (post.comments.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 2, 14, 4),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: post.comments
+                    .map((c) => Padding(
+                          padding: const EdgeInsets.only(bottom: 3),
+                          child: RichText(
+                            text: TextSpan(
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontFamily: AppTheme.bodyFamily,
+                                color: AppTheme.textPrimary,
+                              ),
+                              children: [
+                                TextSpan(
+                                  text: '${c.name}  ',
+                                  style: const TextStyle(
+                                      fontWeight: FontWeight.w700),
+                                ),
+                                TextSpan(
+                                  text: c.text,
+                                  style: TextStyle(
+                                      color: AppTheme.textSecondary),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ))
+                    .toList(),
+              ),
+            ),
+
+          // ── Comment input ──
+          if (_commentOpen)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 2, 12, 10),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _commentCtrl,
+                      style: TextStyle(
+                          color: AppTheme.textPrimary, fontSize: 12),
+                      decoration: InputDecoration(
+                        isDense: true,
+                        hintText: 'コメントを追加…',
+                        hintStyle: TextStyle(
+                            color: AppTheme.textTertiary, fontSize: 12),
+                        contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 8),
+                        filled: true,
+                        fillColor: AppTheme.surface,
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(18),
+                          borderSide: BorderSide(
+                              color: AppTheme.ink.withValues(alpha: 0.15)),
+                        ),
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(18),
+                          borderSide: BorderSide(
+                              color: AppTheme.ink.withValues(alpha: 0.15)),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(18),
+                          borderSide: BorderSide(color: AppTheme.accent),
+                        ),
+                      ),
+                      onSubmitted: (_) => _submitComment(),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  GestureDetector(
+                    onTap: _submitComment,
+                    child: Container(
+                      width: 32, height: 32,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: AppTheme.accent,
+                      ),
+                      child: const Icon(Icons.arrow_upward,
+                          size: 16, color: Colors.white),
+                    ),
+                  ),
+                ],
+              ),
+            )
+          else
+            const SizedBox(height: 8),
         ],
       ),
     );

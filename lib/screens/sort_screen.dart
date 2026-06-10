@@ -1,10 +1,9 @@
+// Sort-mode UI parts shared with MapScreen. Sort mode itself now lives
+// in-place inside MapScreen (no separate screen) so node positions and
+// zoom carry over seamlessly.
 import 'package:flutter/material.dart';
-import '../data/mock_data.dart';
 import '../models/user.dart';
-import '../models/connection.dart';
 import '../theme.dart';
-import '../widgets/node_graph_widget.dart';
-import '../widgets/profile_bottom_sheet.dart';
 
 const _mbtiList = [
   'すべて', 'ENFP', 'INFP', 'ENFJ', 'INFJ',
@@ -18,178 +17,13 @@ const _hobbyList = [
   'プログラミング', 'ダンス', '映画',
 ];
 
-class SortScreen extends StatefulWidget {
-  const SortScreen({super.key});
-
-  @override
-  State<SortScreen> createState() => _SortScreenState();
-}
-
-class _SortScreenState extends State<SortScreen> {
-  bool _is3D = false;
-  bool _exiting = false;
-  String _mbtiFilter = 'すべて';
-  String _hobbyFilter = 'すべて';
-  RelationshipLevel? _levelFilter;
-  bool _showAllEdges = false;
-  bool _panelOpen = true;
-
-  List<String>? get _highlightedIds {
-    if (_mbtiFilter == 'すべて' && _hobbyFilter == 'すべて' && _levelFilter == null) {
-      return null;
-    }
-    return allMockUsers.where((u) {
-      if (u.id == 'self') return true;
-      bool match = true;
-      if (_mbtiFilter != 'すべて') match = match && u.mbti == _mbtiFilter;
-      if (_hobbyFilter != 'すべて') {
-        match = match && u.hobbies.contains(_hobbyFilter);
-      }
-      if (_levelFilter != null) {
-        final conn = selfConnection(u.id);
-        match = match && conn?.level == _levelFilter;
-      }
-      return match;
-    }).map((u) => u.id).toList();
-  }
-
-  bool get _showEdges {
-    if (_showAllEdges) return true;
-    if (_levelFilter != null) return true;
-    return false;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final top = MediaQuery.of(context).padding.top;
-    final allUsers = allMockUsers.where((u) => u.id != 'self').toList();
-    return Stack(
-      children: [
-        Positioned.fill(
-          child: NodeGraphWidget(
-            selfUser: selfUser,
-            users: allUsers,
-            connections: mockConnections,
-            is3D: _is3D,
-            fadeNonDirect: false,
-            highlightedIds: _highlightedIds,
-            showEdges: _showEdges,
-            edgeLevelFilter: _levelFilter,
-            sortMode: true,
-            onSortModeChanged: (active) {
-              if (!active && !_exiting) {
-                _exiting = true;
-                Navigator.maybePop(context);
-              }
-            },
-            onNodeLongPress: (user) {
-              if (user.id == 'self') {
-                ProfileBottomSheet.show(context, user, isSelf: true);
-              } else {
-                ProfileBottomSheet.show(context, user);
-              }
-            },
-          ),
-        ),
-
-        // Top controls
-        Positioned(
-          top: top + 10,
-          left: 18,
-          right: 18,
-          child: Column(
-            children: [
-              Row(
-                children: [
-                  // Back button
-                  GestureDetector(
-                    onTap: () => Navigator.maybePop(context),
-                    child: Container(
-                      width: 30, height: 30,
-                      decoration: BoxDecoration(
-                        color: AppTheme.surface.withValues(alpha: 0.85),
-                        shape: BoxShape.circle,
-                        border: Border.all(color: AppTheme.ink.withValues(alpha: 0.22)),
-                      ),
-                      child: Icon(Icons.arrow_back_ios_new, size: 14, color: AppTheme.ink),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Text(
-                    'sort',
-                    style: TextStyle(
-                      color: AppTheme.ink,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                      letterSpacing: 2.5,
-                      decoration: TextDecoration.none,
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  if (_highlightedIds != null)
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 8, vertical: 3),
-                      decoration: BoxDecoration(
-                        color: AppTheme.ink.withValues(alpha: 0.08),
-                        borderRadius: BorderRadius.circular(6),
-                      ),
-                      child: Text(
-                        '${_highlightedIds!.length - 1} hit',
-                        style: TextStyle(
-                          color: AppTheme.ink.withValues(alpha: 0.8),
-                          fontSize: 10,
-                          letterSpacing: 0.5,
-                        ),
-                      ),
-                    ),
-                  const Spacer(),
-                  _MonoMiniBtn(
-                    label: _is3D ? '3D' : '2D',
-                    onTap: () => setState(() => _is3D = !_is3D),
-                  ),
-                  const SizedBox(width: 6),
-                  _MonoMiniBtn(
-                    label: 'filter',
-                    active: _panelOpen,
-                    onTap: () => setState(() => _panelOpen = !_panelOpen),
-                  ),
-                ],
-              ),
-              if (_panelOpen) ...[
-                const SizedBox(height: 10),
-                _FilterPanel(
-                  mbtiFilter: _mbtiFilter,
-                  hobbyFilter: _hobbyFilter,
-                  levelFilter: _levelFilter,
-                  showAllEdges: _showAllEdges,
-                  onMbtiChanged: (v) => setState(() => _mbtiFilter = v),
-                  onHobbyChanged: (v) => setState(() => _hobbyFilter = v),
-                  onLevelChanged: (v) => setState(() => _levelFilter = v),
-                  onShowAllEdgesChanged: (v) =>
-                      setState(() => _showAllEdges = v),
-                  onClear: () => setState(() {
-                    _mbtiFilter = 'すべて';
-                    _hobbyFilter = 'すべて';
-                    _levelFilter = null;
-                    _showAllEdges = false;
-                  }),
-                ),
-              ],
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _MonoMiniBtn extends StatelessWidget {
+class SortMiniBtn extends StatelessWidget {
   final String label;
   final bool active;
   final VoidCallback onTap;
 
-  const _MonoMiniBtn({
+  const SortMiniBtn({
+    super.key,
     required this.label,
     this.active = false,
     required this.onTap,
@@ -228,7 +62,7 @@ class _MonoMiniBtn extends StatelessWidget {
   }
 }
 
-class _FilterPanel extends StatelessWidget {
+class SortFilterPanel extends StatelessWidget {
   final String mbtiFilter;
   final String hobbyFilter;
   final RelationshipLevel? levelFilter;
@@ -239,7 +73,8 @@ class _FilterPanel extends StatelessWidget {
   final ValueChanged<bool> onShowAllEdgesChanged;
   final VoidCallback onClear;
 
-  const _FilterPanel({
+  const SortFilterPanel({
+    super.key,
     required this.mbtiFilter,
     required this.hobbyFilter,
     required this.levelFilter,
