@@ -27,6 +27,7 @@ class SortScreen extends StatefulWidget {
 
 class _SortScreenState extends State<SortScreen> {
   bool _is3D = false;
+  bool _exiting = false;
   String _mbtiFilter = 'すべて';
   String _hobbyFilter = 'すべて';
   RelationshipLevel? _levelFilter;
@@ -75,6 +76,12 @@ class _SortScreenState extends State<SortScreen> {
             showEdges: _showEdges,
             edgeLevelFilter: _levelFilter,
             sortMode: true,
+            onSortModeChanged: (active) {
+              if (!active && !_exiting) {
+                _exiting = true;
+                Navigator.maybePop(context);
+              }
+            },
             onNodeLongPress: (user) {
               if (user.id == 'self') {
                 ProfileBottomSheet.show(context, user, isSelf: true);

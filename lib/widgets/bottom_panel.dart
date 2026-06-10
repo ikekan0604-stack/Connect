@@ -9,8 +9,13 @@ import 'profile_bottom_sheet.dart';
 
 class BottomPanel extends StatefulWidget {
   final ScrollController scrollController;
+  final DraggableScrollableController? sheetController;
 
-  const BottomPanel({super.key, required this.scrollController});
+  const BottomPanel({
+    super.key,
+    required this.scrollController,
+    this.sheetController,
+  });
 
   @override
   State<BottomPanel> createState() => _BottomPanelState();
@@ -19,6 +24,8 @@ class BottomPanel extends StatefulWidget {
 class _BottomPanelState extends State<BottomPanel>
     with SingleTickerProviderStateMixin {
   late TabController _tabCtrl;
+
+  static const _snapSizes = [0.08, 0.45, 0.86];
 
   @override
   void initState() {
@@ -30,6 +37,45 @@ class _BottomPanelState extends State<BottomPanel>
   void dispose() {
     _tabCtrl.dispose();
     super.dispose();
+  }
+
+  // The handle/tab area isn't a scrollable, so DraggableScrollableSheet
+  // ignores drags there — drive the sheet manually via its controller.
+  void _onHandleDrag(DragUpdateDetails d) {
+    final c = widget.sheetController;
+    if (c == null || !c.isAttached) return;
+    final h = MediaQuery.of(context).size.height;
+    c.jumpTo((c.size - d.delta.dy / h).clamp(_snapSizes.first, _snapSizes.last));
+  }
+
+  void _onHandleDragEnd(DragEndDetails d) {
+    final c = widget.sheetController;
+    if (c == null || !c.isAttached) return;
+    final v = d.primaryVelocity ?? 0;
+    final cur = c.size;
+    double target;
+    if (v < -250) {
+      target = _snapSizes.firstWhere((s) => s > cur + 0.005,
+          orElse: () => _snapSizes.last);
+    } else if (v > 250) {
+      target = _snapSizes.lastWhere((s) => s < cur - 0.005,
+          orElse: () => _snapSizes.first);
+    } else {
+      target = _snapSizes.reduce(
+          (a, b) => (a - cur).abs() < (b - cur).abs() ? a : b);
+    }
+    c.animateTo(target,
+        duration: const Duration(milliseconds: 260),
+        curve: Curves.easeOutCubic);
+  }
+
+  void _onHandleTap() {
+    final c = widget.sheetController;
+    if (c == null || !c.isAttached) return;
+    final target = c.size < 0.2 ? _snapSizes[1] : _snapSizes.first;
+    c.animateTo(target,
+        duration: const Duration(milliseconds: 280),
+        curve: Curves.easeOutCubic);
   }
 
   @override
@@ -51,39 +97,47 @@ class _BottomPanelState extends State<BottomPanel>
       ),
       child: Column(
         children: [
-          // Handle bar
-          Container(
-            height: 28,
-            alignment: Alignment.center,
-            child: Container(
-              width: 36, height: 4,
-              decoration: BoxDecoration(
-                color: AppTheme.ink.withValues(alpha: 0.22),
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-          ),
-
-          // Tab bar
-          TabBar(
-            controller: _tabCtrl,
-            tabs: const [
-              Tab(text: '友達'),
-              Tab(text: 'プロフィール'),
-              Tab(text: 'タイムライン'),
-            ],
-            labelColor: AppTheme.textPrimary,
-            unselectedLabelColor: AppTheme.textTertiary,
-            indicatorColor: AppTheme.accent,
-            indicatorWeight: 2,
-            labelStyle: TextStyle(
-              fontSize: 13,
-              fontWeight: FontWeight.w700,
-              fontFamily: AppTheme.bodyFamily,
-            ),
-            unselectedLabelStyle: TextStyle(
-              fontSize: 13,
-              fontFamily: AppTheme.bodyFamily,
+          // Handle bar + tab bar: manually draggable region
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: _onHandleTap,
+            onVerticalDragUpdate: _onHandleDrag,
+            onVerticalDragEnd: _onHandleDragEnd,
+            child: Column(
+              children: [
+                Container(
+                  height: 28,
+                  alignment: Alignment.center,
+                  child: Container(
+                    width: 36, height: 4,
+                    decoration: BoxDecoration(
+                      color: AppTheme.ink.withValues(alpha: 0.22),
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                ),
+                TabBar(
+                  controller: _tabCtrl,
+                  tabs: const [
+                    Tab(text: '友達'),
+                    Tab(text: 'プロフィール'),
+                    Tab(text: 'タイムライン'),
+                  ],
+                  labelColor: AppTheme.textPrimary,
+                  unselectedLabelColor: AppTheme.textTertiary,
+                  indicatorColor: AppTheme.accent,
+                  indicatorWeight: 2,
+                  labelStyle: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    fontFamily: AppTheme.bodyFamily,
+                  ),
+                  unselectedLabelStyle: TextStyle(
+                    fontSize: 13,
+                    fontFamily: AppTheme.bodyFamily,
+                  ),
+                ),
+              ],
             ),
           ),
 

@@ -54,6 +54,7 @@ class _MapScreenState extends State<MapScreen> {
   double _pendingNodeCount = 18;
   double _pendingMaxDegree = 3;
   Timer? _debounceTimer;
+  final _sheetCtrl = DraggableScrollableController();
 
   static const _groupColors = [
     Color(0xFF6B7BFB), Color(0xFFE88B6B), Color(0xFF6BC47B),
@@ -63,6 +64,7 @@ class _MapScreenState extends State<MapScreen> {
   @override
   void dispose() {
     _debounceTimer?.cancel();
+    _sheetCtrl.dispose();
     super.dispose();
   }
 
@@ -272,12 +274,16 @@ class _MapScreenState extends State<MapScreen> {
 
               // ── Draggable bottom sheet ──
               DraggableScrollableSheet(
+                controller: _sheetCtrl,
                 initialChildSize: 0.08,
                 minChildSize: 0.08,
                 maxChildSize: 0.86,
                 snap: true,
                 snapSizes: const [0.08, 0.45, 0.86],
-                builder: (bctx, ctrl) => BottomPanel(scrollController: ctrl),
+                builder: (bctx, ctrl) => BottomPanel(
+                  scrollController: ctrl,
+                  sheetController: _sheetCtrl,
+                ),
               ),
             ],
           );

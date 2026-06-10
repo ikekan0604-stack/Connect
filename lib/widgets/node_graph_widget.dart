@@ -131,6 +131,10 @@ double _edgeThickness(RelationshipLevel l) {
 // Sort mode: rubber-band pinch-out physics
 const double _kMinNormalScale    = 0.28; // pinch wall — resistance starts here
 const double _kSortSnapThreshold = 0.13; // virtualScale below this → snap to sort
+// Sort screen bounds
+const double _kSortFloorScale    = 0.35; // sort screen pinch-out hard limit
+const double _kMaxSortScale      = 1.25; // sort screen pinch-in wall
+const double _kSortExitThreshold = 2.1;  // virtualScale above this → back home
 
 // ---------------- Widget ----------------
 
@@ -230,7 +234,6 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
 
   // ---- Sort mode rubber-band state ----
   double _virtualScale = 1.0;
-  double _rubberBandDepth = 0.0; // 0.0 = no tension, 1.0 = snap threshold
 
   // ---- Repaint extra trigger ----
   final ValueNotifier<int> _overlayVersion = ValueNotifier(0);
@@ -804,6 +807,7 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
       }
       _draggingNodeId = null;
       _baseScale = _view.scale;
+      _virtualScale = _view.scale;
     }
 
     _prevFocal = _focal();
@@ -862,30 +866,38 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
       double newScale = _view.scale;
       if (d != null && prev != null && prev > 0) {
         final ratio = d / prev;
-        _virtualScale = (_virtualScale * ratio).clamp(0.05, 3.5);
+        _virtualScale = (_virtualScale * ratio).clamp(0.05, 6.0);
 
-        if (!widget.sortMode && _virtualScale < _kMinNormalScale) {
-          // Rubber-band resistance: displayed scale resists the pull
-          final deficit = _kMinNormalScale - _virtualScale;
-          newScale = (_kMinNormalScale - deficit * 0.32).clamp(0.10, 3.5);
-          final depth = (deficit / (_kMinNormalScale - _kSortSnapThreshold)).clamp(0.0, 1.0);
-          if ((depth - _rubberBandDepth).abs() > 0.005) {
-            setState(() => _rubberBandDepth = depth);
-            _overlayVersion.value++;
-          }
-          if (_virtualScale < _kSortSnapThreshold) {
-            // Snap to sort mode ("ぐんっ" transition)
-            _virtualScale = _kMinNormalScale;
-            setState(() => _rubberBandDepth = 0.0);
-            _overlayVersion.value++;
-            widget.onSortModeChanged?.call(true);
-            newScale = _kMinNormalScale;
+        if (!widget.sortMode) {
+          if (_virtualScale < _kMinNormalScale) {
+            // Rubber-band: displayed scale strongly resists further pinch-out
+            final deficit = _kMinNormalScale - _virtualScale;
+            newScale = (_kMinNormalScale - deficit * 0.15).clamp(0.10, 3.5);
+            if (_virtualScale < _kSortSnapThreshold) {
+              // Snap into sort mode ("ぐんっ" transition)
+              _virtualScale = _kMinNormalScale;
+              newScale = _kMinNormalScale;
+              widget.onSortModeChanged?.call(true);
+            }
+          } else {
+            newScale = _virtualScale.clamp(0.10, 3.5);
           }
         } else {
-          newScale = _virtualScale.clamp(0.10, 3.5);
-          if (_rubberBandDepth != 0.0) {
-            setState(() => _rubberBandDepth = 0.0);
-            _overlayVersion.value++;
+          // Sort screen: hard floor on pinch-out, rubber-band wall on pinch-in → home
+          if (_virtualScale < _kSortFloorScale) {
+            _virtualScale = _kSortFloorScale;
+            newScale = _kSortFloorScale;
+          } else if (_virtualScale > _kMaxSortScale) {
+            final excess = _virtualScale - _kMaxSortScale;
+            newScale = _kMaxSortScale + excess * 0.15;
+            if (_virtualScale > _kSortExitThreshold) {
+              // Snap back to home
+              _virtualScale = _kMaxSortScale;
+              newScale = _kMaxSortScale;
+              widget.onSortModeChanged?.call(false);
+            }
+          } else {
+            newScale = _virtualScale;
           }
         }
       }
@@ -959,8 +971,9 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
       if (!widget.sortMode && _virtualScale < _kMinNormalScale) {
         _virtualScale = _kMinNormalScale;
         _view.update(scale: _kMinNormalScale);
-        setState(() => _rubberBandDepth = 0.0);
-        _overlayVersion.value++;
+      } else if (widget.sortMode && _virtualScale > _kMaxSortScale) {
+        _virtualScale = _kMaxSortScale;
+        _view.update(scale: _kMaxSortScale);
       }
     } else {
       _prevFocal = _focal();
@@ -1026,7 +1039,6 @@ class _NodeGraphWidgetState extends State<NodeGraphWidget>
                 sortMode: widget.sortMode,
                 decoStyle: decoStyleNotifier.value,
                 editMode: widget.editMode,
-                rubberBandDepth: _rubberBandDepth,
               ),
             ),
           ),
@@ -1423,7 +1435,6 @@ class _GraphPainter extends CustomPainter {
   final bool sortMode;
   final DecoStyle decoStyle;
   final bool editMode;
-  final double rubberBandDepth;
 
   final _fillPaint = Paint();
   final _rimPaint = Paint()
@@ -1462,7 +1473,6 @@ class _GraphPainter extends CustomPainter {
     required this.sortMode,
     required this.decoStyle,
     required this.editMode,
-    required this.rubberBandDepth,
   }) : super(repaint: Listenable.merge([view, animT]));
 
   double _nodeOpacity(_WorldNode node) {
@@ -1564,7 +1574,7 @@ class _GraphPainter extends CustomPainter {
     }
 
     // ---- Edges ----
-    if (showEdges && !sortMode) {
+    if (showEdges) {
       for (final e in worldEdges) {
         if (e.fromIdx >= n || e.toIdx >= n) continue;
         double alpha = e.opacity;
@@ -1586,13 +1596,9 @@ class _GraphPainter extends CustomPainter {
     if (is3D) order.sort((a, b) => depths[b].compareTo(depths[a]));
 
     // ---- Nodes ----
-    if (sortMode) {
-      _drawSortModeNodes(canvas, order, posList, radList);
-    } else {
-      for (final i in order) {
-        _drawNodeBody(canvas, worldNodes[i], posList[i], radList[i]);
-        _drawNodeRings(canvas, worldNodes[i], posList[i], radList[i]);
-      }
+    for (final i in order) {
+      _drawNodeBody(canvas, worldNodes[i], posList[i], radList[i]);
+      _drawNodeRings(canvas, worldNodes[i], posList[i], radList[i]);
     }
 
     // Edit mode: highlight dragged node
@@ -1612,47 +1618,6 @@ class _GraphPainter extends CustomPainter {
       _drawLasso(canvas);
     }
 
-    // ---- Sort pull indicator (rubber-band tension visualization) ----
-    if (rubberBandDepth > 0.0 && !sortMode) {
-      _drawSortPullIndicator(canvas, size);
-    }
-  }
-
-  void _drawSortPullIndicator(Canvas canvas, Size size) {
-    final cx = size.width / 2;
-    final cy = size.height / 2;
-    final t = rubberBandDepth;
-
-    // Expanding ring that shows tension building up
-    final r = 18.0 + t * 18.0;
-    canvas.drawCircle(
-      Offset(cx, cy), r,
-      Paint()
-        ..color = palette.accent.withValues(alpha: t * 0.14)
-        ..style = PaintingStyle.fill,
-    );
-    canvas.drawCircle(
-      Offset(cx, cy), r,
-      Paint()
-        ..color = palette.accent.withValues(alpha: 0.25 + t * 0.65)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.4 + t * 2.2,
-    );
-
-    final tp = TextPainter(
-      text: TextSpan(
-        text: 'sort',
-        style: TextStyle(
-          color: palette.ink.withValues(alpha: 0.25 + t * 0.55),
-          fontSize: 9.0 + t * 3.0,
-          fontWeight: FontWeight.w700,
-          fontFamily: AppTheme.bodyFamily,
-        ),
-      ),
-      textDirection: TextDirection.ltr,
-    )..layout();
-    tp.paint(canvas, Offset(cx - tp.width / 2, cy - tp.height / 2));
-    tp.dispose();
   }
 
   // ---- Group shapes: axis-aligned rounded rectangles ----
@@ -1702,24 +1667,6 @@ class _GraphPainter extends CustomPainter {
       )..layout();
       tp.paint(canvas, Offset(minX - pad + 8, minY - pad - tp.height - 4));
       tp.dispose();
-    }
-  }
-
-  // ---- Sort mode: uniform abstract dots ----
-
-  void _drawSortModeNodes(
-      Canvas canvas, List<int> order, List<Offset> posList, List<double> radList) {
-    for (final i in order) {
-      final node = worldNodes[i];
-      final isSelf = node.user.id == 'self';
-      final opacity = _nodeOpacity(node);
-      final dotR = isSelf ? 10.0 : 6.0;
-      final color = isSelf
-          ? palette.accent.withValues(alpha: opacity)
-          : (highlightedIds != null && highlightedIds!.contains(node.user.id))
-              ? palette.ink.withValues(alpha: opacity * 0.75)
-              : palette.ink.withValues(alpha: opacity * 0.25);
-      canvas.drawCircle(posList[i], dotR, Paint()..color = color);
     }
   }
 
@@ -2009,6 +1956,5 @@ class _GraphPainter extends CustomPainter {
       old.lassoPoints != lassoPoints ||
       old.sortMode != sortMode ||
       old.decoStyle != decoStyle ||
-      old.editMode != editMode ||
-      old.rubberBandDepth != rubberBandDepth;
+      old.editMode != editMode;
 }
